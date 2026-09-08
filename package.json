@@ -2,15 +2,19 @@
   "scripts": {
     "screenshot": "node screenshot.mjs",
     "screenshot:workbench": "node frontend-screenshot.mjs",
+    "format:check": "prettier --check .",
+    "format:write": "prettier --write .",
+    "check:python": "D:\\program\\anaconda\\python.exe -m py_compile workers/whisper_worker.py",
     "prepare": "husky"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0"
-    ,"husky": "^9.1.7",
+    "@playwright/test": "^1.63.0",
+    "husky": "^9.1.7",
     "lint-staged": "^15.2.11",
     "prettier": "^3.4.2"
   },
   "lint-staged": {
-    "*.{js,mjs,ts,vue,json,css,md}": "prettier --write"
+    "*.{js,mjs,ts,vue,json,css,md,yml,yaml}": "prettier --write",
+    "workers/*.py": "D:\\program\\anaconda\\python.exe -m py_compile"
   }
 }
