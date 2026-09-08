@@ -1,5 +1,6 @@
 data/
 storage/
+models/
 artifacts/
 node_modules/
 .npm-cache/

@@ -29,6 +29,7 @@ class TaskService {
   private final String whisperPython;
   private final String whisperWorker;
   private final String whisperModel;
+  private final String whisperModelDir;
   private final String coderplanApiKey;
   private final ObjectMapper json;
   private final CoderplanClient coderplan;
@@ -38,8 +39,8 @@ class TaskService {
   private final ExecutorService queue = Executors.newSingleThreadExecutor();
   private final Map<String, Process> runningProcesses = new ConcurrentHashMap<>();
 
-  TaskService(TaskRepository tasks, ObjectMapper json, CoderplanClient coderplan, ResultValidator resultValidator, @Value("${workbench.storage-dir}") String storageDir, @Value("${workbench.ffmpeg-path}") String ffmpeg, @Value("${workbench.whisper-python}") String whisperPython, @Value("${workbench.whisper-worker}") String whisperWorker, @Value("${workbench.whisper-model}") String whisperModel, @Value("${workbench.coderplan.api-key:}") String coderplanApiKey, @Value("${workbench.max-upload-bytes}") long maxUploadBytes, @Value("${workbench.process-timeout-minutes}") long timeoutMinutes) {
-    this.tasks = tasks; this.json = json; this.coderplan = coderplan; this.resultValidator = resultValidator; this.storage = Path.of(storageDir); this.ffmpeg = ffmpeg; this.whisperPython = whisperPython; this.whisperWorker = whisperWorker; this.whisperModel = whisperModel; this.coderplanApiKey = coderplanApiKey; this.maxUploadBytes = maxUploadBytes; this.timeoutMinutes = timeoutMinutes;
+  TaskService(TaskRepository tasks, ObjectMapper json, CoderplanClient coderplan, ResultValidator resultValidator, @Value("${workbench.storage-dir}") String storageDir, @Value("${workbench.ffmpeg-path}") String ffmpeg, @Value("${workbench.whisper-python}") String whisperPython, @Value("${workbench.whisper-worker}") String whisperWorker, @Value("${workbench.whisper-model}") String whisperModel, @Value("${workbench.whisper-model-dir}") String whisperModelDir, @Value("${workbench.coderplan.api-key:}") String coderplanApiKey, @Value("${workbench.max-upload-bytes}") long maxUploadBytes, @Value("${workbench.process-timeout-minutes}") long timeoutMinutes) {
+    this.tasks = tasks; this.json = json; this.coderplan = coderplan; this.resultValidator = resultValidator; this.storage = Path.of(storageDir); this.ffmpeg = ffmpeg; this.whisperPython = whisperPython; this.whisperWorker = whisperWorker; this.whisperModel = whisperModel; this.whisperModelDir = whisperModelDir; this.coderplanApiKey = coderplanApiKey; this.maxUploadBytes = maxUploadBytes; this.timeoutMinutes = timeoutMinutes;
   }
 
   List<VideoTask> list() { return tasks.all(); }
@@ -69,7 +70,7 @@ class TaskService {
       checkCancelled(id); tasks.update(id, TaskStatus.PROCESSING, TaskStage.TRANSCRIPTION, 45, null);
       currentStage = TaskStage.TRANSCRIPTION;
       // Worker emits JSON to stdout; production parser persists each timestamped segment here.
-      String output = run(id, List.of(whisperPython, whisperWorker, audio.toString(), "--model", whisperModel));
+      String output = run(id, List.of(whisperPython, whisperWorker, audio.toString(), "--model", whisperModel, "--model-dir", whisperModelDir));
       persistTranscript(id, output);
       checkCancelled(id); tasks.update(id, TaskStatus.COMPLETED, TaskStage.SUMMARY, 100, "本地转写已完成；请配置摘要服务后单独重试内容生成");
     } catch (Cancelled ignored) { tasks.update(id, TaskStatus.CANCELLED, currentStage, 0, null); }

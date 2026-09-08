@@ -15,6 +15,7 @@ workbench:
   whisper-python: ${WHISPER_PYTHON:python}
   whisper-worker: ${WHISPER_WORKER:workers/whisper_worker.py}
   whisper-model: ${WHISPER_MODEL:turbo}
+  whisper-model-dir: ${WHISPER_MODEL_DIR:./models/whisper}
   coderplan:
     base-url: ${CODERPLAN_BASE_URL:https://api.coderplan.ai/v1}
     api-key: ${CODERPLAN_API_KEY:}
