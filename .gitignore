@@ -1,0 +1,13 @@
+data/
+storage/
+artifacts/
+node_modules/
+.npm-cache/
+frontend/node_modules/
+frontend/dist/
+backend/target/
+*.log
+.env
+.idea/
+.mvn/wrapper/apache-maven/
+.mvn/wrapper/maven.zip

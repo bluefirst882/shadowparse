@@ -1,0 +1,20 @@
+spring:
+  config.import: optional:file:.env[.properties]
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:video_workbench}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: ${MYSQL_USERNAME:video_workbench}
+    password: ${MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  flyway.enabled: true
+server.error.include-message: never
+workbench:
+  storage-dir: ${WORKBENCH_STORAGE_DIR:./storage}
+  ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
+  whisper-python: ${WHISPER_PYTHON:python}
+  whisper-worker: ${WHISPER_WORKER:workers/whisper_worker.py}
+  whisper-model: ${WHISPER_MODEL:turbo}
+  coderplan:
+    base-url: ${CODERPLAN_BASE_URL:https://api.coderplan.ai/v1}
+    api-key: ${CODERPLAN_API_KEY:}
+    model: ${CODERPLAN_MODEL:gpt-5.6-terra}
+    reasoning-effort: ${CODERPLAN_REASONING_EFFORT:low}
