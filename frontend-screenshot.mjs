@@ -18,6 +18,14 @@ try {
       path: path.join(outputDir, `workbench-${name}.png`),
       fullPage: true
     })
+    if (name === 'desktop') {
+      await page.getByRole('button', { name: '切换为暗色模式' }).click()
+      await page.locator('html.dark').waitFor()
+      await page.screenshot({
+        path: path.join(outputDir, 'workbench-dark.png'),
+        fullPage: true
+      })
+    }
     await page.close()
   }
   console.log('Workbench desktop and mobile screenshots written to artifacts/')

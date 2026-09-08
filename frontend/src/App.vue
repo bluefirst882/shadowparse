@@ -4,7 +4,9 @@ import {
   ArrowLeft,
   Delete,
   Download,
+  Moon,
   RefreshRight,
+  Sunny,
   UploadFilled,
   VideoPlay
 } from '@element-plus/icons-vue'
@@ -17,6 +19,7 @@ const tasks = ref<Task[]>([]),
   query = ref(''),
   transcriptQuery = ref(''),
   currentMs = ref(0)
+const dark = ref(false)
 const visible = computed(() =>
   tasks.value.filter((t) =>
     t.fileName.toLowerCase().includes(query.value.toLowerCase())
@@ -95,8 +98,19 @@ function stamp(ms: number) {
 function bytes(n: number) {
   return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : (n / 1e6).toFixed(0) + ' MB'
 }
+function applyTheme(value: boolean) {
+  dark.value = value
+  document.documentElement.classList.toggle('dark', value)
+  localStorage.setItem('video-workbench-theme', value ? 'dark' : 'light')
+}
 let timer: number
 onMounted(async () => {
+  const saved = localStorage.getItem('video-workbench-theme')
+  applyTheme(
+    saved
+      ? saved === 'dark'
+      : window.matchMedia('(prefers-color-scheme: dark)').matches
+  )
   await refresh()
   timer = window.setInterval(refresh, 3000)
 })
@@ -107,7 +121,11 @@ onUnmounted(() => clearInterval(timer))
     ><el-header class="header"
       ><div class="brand"><span></span>瞬析 VideoLab</div>
       <div class="context">本地视频解析工作台</div>
-      <el-button circle aria-label="本地单用户">林</el-button></el-header
+      <el-button
+        circle
+        :icon="dark ? Sunny : Moon"
+        :aria-label="dark ? '切换为浅色模式' : '切换为暗色模式'"
+        @click="applyTheme(!dark)" /></el-header
     ><el-main class="main"
       ><template v-if="!selected"
         ><section class="heading">

@@ -9,6 +9,66 @@
 body {
   margin: 0;
 }
+.dark {
+  color-scheme: dark;
+  --el-bg-color: #18232d;
+  --el-bg-color-overlay: #22303c;
+  --el-fill-color-blank: #18232d;
+  --el-fill-color-light: #263642;
+  --el-border-color: #3a4c59;
+  --el-border-color-light: #30414d;
+  --el-text-color-primary: #e4edf4;
+  --el-text-color-regular: #c2d0da;
+  --el-text-color-secondary: #9eb0bd;
+}
+.dark body,
+.dark .shell {
+  color: #e4edf4;
+  background: #111a22;
+}
+.dark .header,
+.dark .metrics div,
+.dark .task-panel,
+.dark .chapter-panel,
+.dark .panel {
+  background: #18232d;
+  border-color: #3a4c59;
+  box-shadow: none;
+}
+.dark .context,
+.dark .toolbar {
+  border-color: #3a4c59;
+}
+.dark .context,
+.dark .heading span,
+.dark small,
+.dark .metrics span,
+.dark .detail-head p,
+.dark .muted {
+  color: #9eb0bd;
+}
+.dark .file-link,
+.dark .chapter,
+.dark .segment {
+  color: #e4edf4;
+}
+.dark .chapter,
+.dark .segment {
+  border-color: #30414d;
+}
+.dark .segment.active {
+  background: #183b5b;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
 .shell {
   min-height: 100vh;
 }
