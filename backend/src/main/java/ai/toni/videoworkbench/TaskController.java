@@ -31,6 +31,7 @@ class TaskController {
   @PostMapping VideoTask create(@RequestParam("file") MultipartFile file) { return service.importVideo(file); }
   @PostMapping("/{id}/cancel") void cancel(@PathVariable String id) { service.cancel(id); }
   @PostMapping("/{id}/retry") void retry(@PathVariable String id) { service.retry(id); }
+  @PostMapping("/{id}/retranscribe") void retranscribe(@PathVariable String id) { service.retranscribe(id); }
   @DeleteMapping("/{id}") void delete(@PathVariable String id) { service.delete(id); }
   @GetMapping(value = "/{id}/export/{format}", produces = MediaType.TEXT_PLAIN_VALUE)
   ResponseEntity<String> export(@PathVariable String id, @PathVariable String format) { return ResponseEntity.ok().header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=video-result." + format).body(exports.export(id, format)); }

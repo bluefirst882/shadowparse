@@ -15,6 +15,7 @@ export type Segment = {
   startMs: number
   endMs: number
   text: string
+  translation?: string
 }
 export type Chapter = {
   startMs: number
@@ -44,6 +45,8 @@ export const api = {
     request<void>(`/tasks/${id}/cancel`, { method: 'POST' }),
   retry: (id: string) =>
     request<void>(`/tasks/${id}/retry`, { method: 'POST' }),
+  retranscribe: (id: string) =>
+    request<void>(`/tasks/${id}/retranscribe`, { method: 'POST' }),
   remove: (id: string) => request<void>(`/tasks/${id}`, { method: 'DELETE' }),
   videoUrl: (id: string) => `/api/tasks/${id}/video`,
   exportUrl: (id: string, format: 'md' | 'json' | 'srt') =>

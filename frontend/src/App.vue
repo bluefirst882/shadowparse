@@ -65,7 +65,7 @@ async function choose(file: File) {
   }
   return false
 }
-async function action(task: Task, type: 'cancel' | 'retry' | 'remove') {
+async function action(task: Task, type: 'cancel' | 'retry' | 'retranscribe' | 'remove') {
   try {
     await api[type](task.id)
     if (selected.value?.task.id === task.id && type === 'remove')
@@ -240,6 +240,12 @@ onUnmounted(() => clearInterval(timer))
                   @click="action(row, 'retry')"
                   >重试</el-button
                 ><el-button
+                  v-if="row.status === 'COMPLETED'"
+                  link
+                  type="primary"
+                  @click="action(row, 'retranscribe')"
+                  >重新转写</el-button
+                ><el-button
                   link
                   type="danger"
                   :icon="Delete"
@@ -335,7 +341,8 @@ onUnmounted(() => clearInterval(timer))
               @click="seek(segment.startMs)"
             >
               <span>{{ stamp(segment.startMs) }}</span
-              >{{ segment.text }}
+              ><b>{{ segment.text }}</b>
+              ><small v-if="segment.translation">{{ segment.translation }}</small>
             </button>
           </article>
           <aside class="panel result">

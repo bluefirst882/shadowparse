@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local Whisper worker. Emits timestamped segments as JSON; never sends media remotely."""
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -16,15 +17,20 @@ def main():
         # Anaconda's NumPy and PyTorch can load separate OpenMP runtimes on Windows.
         os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
         import whisper
+        import torch
 
         print(f"正在加载 Whisper {args.model} 模型", file=sys.stderr)
-        model = whisper.load_model(args.model, download_root=args.model_dir)
-        result = model.transcribe(
-            args.audio,
-            language=args.language,
-            fp16=False,
-            verbose=False,
-        )
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"使用推理设备 {device}", file=sys.stderr)
+        # Keep stdout reserved for the final JSON payload consumed by the backend.
+        with contextlib.redirect_stdout(sys.stderr):
+            model = whisper.load_model(args.model, download_root=args.model_dir, device=device)
+            result = model.transcribe(
+                args.audio,
+                language=args.language,
+                fp16=device == "cuda",
+                verbose=False,
+            )
         segments = [
             {"start": segment["start"], "end": segment["end"], "text": segment["text"].strip()}
             for segment in result["segments"]

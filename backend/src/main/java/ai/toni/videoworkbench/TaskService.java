@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.springframework.beans.factory.annotation.Value;
@@ -58,6 +59,7 @@ class TaskService {
   }
   void cancel(String id) { get(id); tasks.cancel(id); Process process = runningProcesses.remove(id); if (process != null) process.destroyForcibly(); }
   void retry(String id) { VideoTask task = get(id); if (task.status() == TaskStatus.PROCESSING) throw new ResponseStatusException(HttpStatus.CONFLICT, "任务正在处理"); tasks.reset(id, task.stage() == TaskStage.SUMMARY || task.stage() == TaskStage.COMPLETED ? TaskStage.SUMMARY : TaskStage.IMPORT); enqueue(id); }
+  void retranscribe(String id) { VideoTask task = get(id); if (task.status() == TaskStatus.PROCESSING) throw new ResponseStatusException(HttpStatus.CONFLICT, "任务正在处理"); tasks.reset(id, TaskStage.IMPORT); enqueue(id); }
   void delete(String id) {
     VideoTask task = get(id);
     Process process = runningProcesses.remove(id);
@@ -80,7 +82,7 @@ class TaskService {
       persistTranscript(id, output);
       checkCancelled(id); tasks.update(id, TaskStatus.COMPLETED, TaskStage.SUMMARY, 100, "本地转写已完成；请配置摘要服务后单独重试内容生成");
     } catch (Cancelled ignored) { tasks.update(id, TaskStatus.CANCELLED, currentStage, 0, null); }
-      catch (Exception ex) { tasks.update(id, TaskStatus.FAILED, currentStage, 0, "本地处理失败，请检查 FFmpeg、Whisper 与视频文件后重试"); }
+      catch (Exception ex) { String detail = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage(); tasks.update(id, TaskStatus.FAILED, currentStage, 0, "本地处理失败：" + tail(detail)); }
   }
   private void generateContent(String id) {
     if (coderplanApiKey.isBlank() || !coderplan.configured()) { tasks.update(id, TaskStatus.COMPLETED, TaskStage.SUMMARY, 100, "未配置 CODERPLAN_API_KEY；本地转写已保留，可配置后重试。"); return; }
@@ -97,9 +99,10 @@ class TaskService {
     } catch (Cancelled ignored) { tasks.update(id, TaskStatus.CANCELLED, TaskStage.SUMMARY, 0, null);
     } catch (Exception ex) { tasks.update(id, TaskStatus.FAILED, TaskStage.SUMMARY, 100, "内容生成失败，本地转写已保留，可稍后重试。"); }
   }
-  private String run(String id, List<String> command) throws IOException, InterruptedException { Process process = new ProcessBuilder(command).redirectErrorStream(true).start(); runningProcesses.put(id, process); CompletableFuture<String> output = CompletableFuture.supplyAsync(() -> { try { return new String(process.getInputStream().readAllBytes()); } catch (IOException ex) { throw new UncheckedIOException(ex); } }); try { if (!process.waitFor(timeoutMinutes, java.util.concurrent.TimeUnit.MINUTES)) { process.destroyForcibly(); throw new IOException("外部进程超时"); } if (tasks.cancelled(id)) throw new Cancelled(); String diagnostic = output.join(); if (process.exitValue() != 0) throw new IOException("外部进程失败：" + tail(diagnostic)); return diagnostic; } finally { runningProcesses.remove(id, process); } }
+  private String run(String id, List<String> command) throws IOException, InterruptedException { ProcessBuilder builder = new ProcessBuilder(command); builder.environment().put("PYTHONIOENCODING", "utf-8"); Process process = builder.start(); runningProcesses.put(id, process); CompletableFuture<String> output = read(process.getInputStream()); CompletableFuture<String> error = read(process.getErrorStream()); try { if (!process.waitFor(timeoutMinutes, java.util.concurrent.TimeUnit.MINUTES)) { process.destroyForcibly(); throw new IOException("外部进程超时"); } if (tasks.cancelled(id)) throw new Cancelled(); String result = output.join(); String diagnostic = error.join(); if (process.exitValue() != 0) throw new IOException("外部进程失败：" + tail(diagnostic)); return result; } finally { runningProcesses.remove(id, process); } }
+  private CompletableFuture<String> read(java.io.InputStream stream) { return CompletableFuture.supplyAsync(() -> { try { return new String(stream.readAllBytes(), StandardCharsets.UTF_8); } catch (IOException ex) { throw new UncheckedIOException(ex); } }); }
   private String tail(String output) { String compact = output == null ? "" : output.replaceAll("\\s+", " ").trim(); return compact.length() <= 240 ? compact : compact.substring(compact.length() - 240); }
-  private void persistTranscript(String id, String output) throws IOException { JsonNode segments = json.readTree(output).path("segments"); if (!segments.isArray() || segments.isEmpty()) throw new IOException("Whisper 未返回有效转写"); java.util.ArrayList<TranscriptSegment> saved = new java.util.ArrayList<>(); for (JsonNode segment : segments) { long start = Math.round(segment.path("start").asDouble() * 1000); long end = Math.round(segment.path("end").asDouble() * 1000); String text = segment.path("text").asText().trim(); if (end > start && !text.isBlank()) saved.add(new TranscriptSegment(0, start, end, text)); } if (saved.isEmpty()) throw new IOException("转写内容为空"); tasks.replaceSegments(id, saved); }
+  private void persistTranscript(String id, String output) throws Exception { JsonNode root = json.readTree(output); JsonNode segments = root.path("segments"); if (!segments.isArray() || segments.isEmpty()) throw new IOException("Whisper 未返回有效转写"); java.util.ArrayList<TranscriptSegment> saved = new java.util.ArrayList<>(); for (JsonNode segment : segments) { long start = Math.round(segment.path("start").asDouble() * 1000); long end = Math.round(segment.path("end").asDouble() * 1000); String text = segment.path("text").asText().trim(); if (end > start && !text.isBlank()) saved.add(new TranscriptSegment(0, start, end, text, null)); } if (saved.isEmpty()) throw new IOException("转写内容为空"); tasks.replaceSegments(id, saved); if (!root.path("language").asText().startsWith("zh") && coderplan.configured()) tasks.replaceTranslations(id, coderplan.translateToChinese(tasks.segments(id))); }
   private void checkCancelled(String id) { if (tasks.cancelled(id)) throw new Cancelled(); }
   private boolean isVideo(String type, String name) { return type != null && type.startsWith("video/") || name != null && name.matches("(?i).*\\.(mp4|mov|mkv|webm|avi)$"); }
   private String extension(String name) { int index = name == null ? -1 : name.lastIndexOf('.'); return index < 0 ? ".mp4" : name.substring(index); }
