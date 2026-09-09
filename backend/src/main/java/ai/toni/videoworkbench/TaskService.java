@@ -58,7 +58,13 @@ class TaskService {
   }
   void cancel(String id) { get(id); tasks.cancel(id); Process process = runningProcesses.remove(id); if (process != null) process.destroyForcibly(); }
   void retry(String id) { VideoTask task = get(id); if (task.status() == TaskStatus.PROCESSING) throw new ResponseStatusException(HttpStatus.CONFLICT, "任务正在处理"); tasks.reset(id, task.stage() == TaskStage.SUMMARY || task.stage() == TaskStage.COMPLETED ? TaskStage.SUMMARY : TaskStage.IMPORT); enqueue(id); }
-  void delete(String id) { VideoTask task = get(id); try { Files.deleteIfExists(Path.of(task.videoPath())); } catch (IOException ignored) { } tasks.delete(id); }
+  void delete(String id) {
+    VideoTask task = get(id);
+    Process process = runningProcesses.remove(id);
+    if (process != null) process.destroyForcibly();
+    try { Files.deleteIfExists(Path.of(task.videoPath())); } catch (IOException ignored) { }
+    tasks.delete(id);
+  }
   private void enqueue(String id) { queue.submit(() -> process(id)); }
   void recoverAfterRestart() { tasks.markProcessingAsQueued(); tasks.recoverable().forEach(task -> enqueue(task.id())); }
   private void process(String id) {
@@ -76,8 +82,23 @@ class TaskService {
     } catch (Cancelled ignored) { tasks.update(id, TaskStatus.CANCELLED, currentStage, 0, null); }
       catch (Exception ex) { tasks.update(id, TaskStatus.FAILED, currentStage, 0, "本地处理失败，请检查 FFmpeg、Whisper 与视频文件后重试"); }
   }
-  private void generateContent(String id) { if (coderplanApiKey.isBlank() || !coderplan.configured()) { tasks.update(id, TaskStatus.COMPLETED, TaskStage.SUMMARY, 100, "未配置 CODERPLAN_API_KEY；本地转写已保留，可配置后重试。"); return; } List<TranscriptSegment> transcript = tasks.segments(id); if (transcript.isEmpty()) { tasks.update(id, TaskStatus.FAILED, TaskStage.SUMMARY, 100, "没有可用于内容生成的转写结果。"); return; } try { tasks.update(id, TaskStatus.PROCESSING, TaskStage.SUMMARY, 85, null); TaskResult result = coderplan.summarize(transcript); resultValidator.validate(result, transcript); tasks.saveResult(id, result); tasks.update(id, TaskStatus.COMPLETED, TaskStage.COMPLETED, 100, null); } catch (Exception ex) { tasks.update(id, TaskStatus.FAILED, TaskStage.SUMMARY, 100, "内容生成失败，本地转写已保留，可稍后重试。"); } }
-  private String run(String id, List<String> command) throws IOException, InterruptedException { Process process = new ProcessBuilder(command).redirectErrorStream(true).start(); runningProcesses.put(id, process); CompletableFuture<String> output = CompletableFuture.supplyAsync(() -> { try { return new String(process.getInputStream().readAllBytes()); } catch (IOException ex) { throw new UncheckedIOException(ex); } }); try { if (!process.waitFor(timeoutMinutes, java.util.concurrent.TimeUnit.MINUTES)) { process.destroyForcibly(); throw new IOException("外部进程超时"); } if (tasks.cancelled(id)) throw new Cancelled(); if (process.exitValue() != 0) throw new IOException("外部进程失败"); return output.join(); } finally { runningProcesses.remove(id, process); } }
+  private void generateContent(String id) {
+    if (coderplanApiKey.isBlank() || !coderplan.configured()) { tasks.update(id, TaskStatus.COMPLETED, TaskStage.SUMMARY, 100, "未配置 CODERPLAN_API_KEY；本地转写已保留，可配置后重试。"); return; }
+    List<TranscriptSegment> transcript = tasks.segments(id);
+    if (transcript.isEmpty()) { tasks.update(id, TaskStatus.FAILED, TaskStage.SUMMARY, 100, "没有可用于内容生成的转写结果。"); return; }
+    try {
+      tasks.update(id, TaskStatus.PROCESSING, TaskStage.SUMMARY, 85, null);
+      TaskResult result = coderplan.summarize(transcript);
+      checkCancelled(id);
+      resultValidator.validate(result, transcript);
+      tasks.saveResult(id, result);
+      checkCancelled(id);
+      tasks.update(id, TaskStatus.COMPLETED, TaskStage.COMPLETED, 100, null);
+    } catch (Cancelled ignored) { tasks.update(id, TaskStatus.CANCELLED, TaskStage.SUMMARY, 0, null);
+    } catch (Exception ex) { tasks.update(id, TaskStatus.FAILED, TaskStage.SUMMARY, 100, "内容生成失败，本地转写已保留，可稍后重试。"); }
+  }
+  private String run(String id, List<String> command) throws IOException, InterruptedException { Process process = new ProcessBuilder(command).redirectErrorStream(true).start(); runningProcesses.put(id, process); CompletableFuture<String> output = CompletableFuture.supplyAsync(() -> { try { return new String(process.getInputStream().readAllBytes()); } catch (IOException ex) { throw new UncheckedIOException(ex); } }); try { if (!process.waitFor(timeoutMinutes, java.util.concurrent.TimeUnit.MINUTES)) { process.destroyForcibly(); throw new IOException("外部进程超时"); } if (tasks.cancelled(id)) throw new Cancelled(); String diagnostic = output.join(); if (process.exitValue() != 0) throw new IOException("外部进程失败：" + tail(diagnostic)); return diagnostic; } finally { runningProcesses.remove(id, process); } }
+  private String tail(String output) { String compact = output == null ? "" : output.replaceAll("\\s+", " ").trim(); return compact.length() <= 240 ? compact : compact.substring(compact.length() - 240); }
   private void persistTranscript(String id, String output) throws IOException { JsonNode segments = json.readTree(output).path("segments"); if (!segments.isArray() || segments.isEmpty()) throw new IOException("Whisper 未返回有效转写"); java.util.ArrayList<TranscriptSegment> saved = new java.util.ArrayList<>(); for (JsonNode segment : segments) { long start = Math.round(segment.path("start").asDouble() * 1000); long end = Math.round(segment.path("end").asDouble() * 1000); String text = segment.path("text").asText().trim(); if (end > start && !text.isBlank()) saved.add(new TranscriptSegment(0, start, end, text)); } if (saved.isEmpty()) throw new IOException("转写内容为空"); tasks.replaceSegments(id, saved); }
   private void checkCancelled(String id) { if (tasks.cancelled(id)) throw new Cancelled(); }
   private boolean isVideo(String type, String name) { return type != null && type.startsWith("video/") || name != null && name.matches("(?i).*\\.(mp4|mov|mkv|webm|avi)$"); }
