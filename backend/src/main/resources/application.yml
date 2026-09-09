@@ -17,7 +17,7 @@ workbench:
   process-timeout-minutes: ${WORKBENCH_PROCESS_TIMEOUT_MINUTES:30}
   ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
   whisper-python: ${WHISPER_PYTHON:python}
-  whisper-worker: ${WHISPER_WORKER:workers/whisper_worker.py}
+  whisper-worker: ${WHISPER_WORKER:../workers/whisper_worker.py}
   whisper-model: ${WHISPER_MODEL:turbo}
   whisper-model-dir: ${WHISPER_MODEL_DIR:./models/whisper}
   coderplan:
