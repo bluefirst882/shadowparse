@@ -5,7 +5,7 @@
 ## 开发环境
 
 - Java 21、MySQL 8.0+、Python 3.11+、FFmpeg、Node.js 20+
-- 将 `FFMPEG_PATH` 指向 FFmpeg 可执行文件（默认 `ffmpeg`）；可用 `WORKBENCH_DATABASE_PATH` 与 `WORKBENCH_STORAGE_DIR` 改变本地保存位置。
+- 将 `FFMPEG_PATH` 指向 FFmpeg 可执行文件（默认 `ffmpeg`）；可用 `MYSQL_*` 与 `WORKBENCH_STORAGE_DIR` 配置数据存储和本地文件位置。
 - Windows Anaconda 环境中，`workers/whisper_worker.py` 会处理 NumPy/PyTorch 的 OpenMP 兼容设置；仍需要通过 `FFMPEG_PATH` 提供 FFmpeg。
 - 安装本地 Whisper：`pip install openai-whisper`
 
