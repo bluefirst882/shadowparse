@@ -14,3 +14,13 @@ __pycache__/
 .idea/
 .mvn/wrapper/apache-maven/
 .mvn/wrapper/maven.zip
+
+guava*.jar
+frame-*.png
+player-detail.png
+video-*.png
+
+# 个人简历文件（不属于本项目）
+豆铭*.docx
+豆铭*.md
+~\$*.docx
