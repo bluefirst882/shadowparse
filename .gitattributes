@@ -1,2 +1,6 @@
 * text=auto eol=lf
 *.cmd text eol=crlf
+
+# Shell 脚本必须保持 LF，否则 Linux CI 上 shebang 解析失败
+mvnw text eol=lf
+*.sh text eol=lf
