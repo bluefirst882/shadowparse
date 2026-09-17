@@ -7,6 +7,7 @@ import org.springframework.scheduling.annotation.EnableAsync;
 @EnableAsync
 @SpringBootApplication
 public class VideoWorkbenchApplication {
-  public static void main(String[] args) { SpringApplication.run(VideoWorkbenchApplication.class, args); }
+  public static void main(String[] args) {
+    SpringApplication.run(VideoWorkbenchApplication.class, args);
+  }
 }
-
