@@ -65,7 +65,10 @@ async function choose(file: File) {
   }
   return false
 }
-async function action(task: Task, type: 'cancel' | 'retry' | 'retranscribe' | 'remove') {
+async function action(
+  task: Task,
+  type: 'cancel' | 'retry' | 'retranscribe' | 'remove'
+) {
   try {
     await api[type](task.id)
     if (selected.value?.task.id === task.id && type === 'remove')
@@ -341,8 +344,9 @@ onUnmounted(() => clearInterval(timer))
               @click="seek(segment.startMs)"
             >
               <span>{{ stamp(segment.startMs) }}</span
-              ><b>{{ segment.text }}</b>
-              ><small v-if="segment.translation">{{ segment.translation }}</small>
+              ><b>{{ segment.text }}</b> ><small v-if="segment.translation">{{
+                segment.translation
+              }}</small>
             </button>
           </article>
           <aside class="panel result">

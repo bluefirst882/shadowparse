@@ -20,13 +20,13 @@
 
 ## 技术栈
 
-| 层次 | 技术 |
-|---|---|
-| 后端 | Java 21、Spring Boot 3.5、Spring JDBC、Maven |
-| 数据库 | MySQL 8 + Flyway 版本迁移 |
-| AI / 音视频 | Whisper（turbo）、FFmpeg、LLM API（结构化输出） |
-| 前端 | Vue 3、TypeScript、Vite、Element Plus |
-| 工程化 | JUnit、Spotless + google-java-format、Docker Compose |
+| 层次        | 技术                                                 |
+| ----------- | ---------------------------------------------------- |
+| 后端        | Java 21、Spring Boot 3.5、Spring JDBC、Maven         |
+| 数据库      | MySQL 8 + Flyway 版本迁移                            |
+| AI / 音视频 | Whisper（turbo）、FFmpeg、LLM API（结构化输出）      |
+| 前端        | Vue 3、TypeScript、Vite、Element Plus                |
+| 工程化      | JUnit、Spotless + google-java-format、Docker Compose |
 
 ---
 
@@ -39,15 +39,16 @@
 
 任务按阶段推进，每个阶段独立可观测：
 
-| 阶段 | 进度 | 说明 |
-|---|---|---|
-| `IMPORT` | 0% | 视频导入与校验 |
-| `AUDIO_EXTRACTION` | 10% | FFmpeg 抽取 16kHz 单声道音频 |
-| `TRANSCRIPTION` | 45% | Whisper 转写并落库带时间戳片段 |
-| `SUMMARY` | 85% | LLM 生成摘要、要点与章节 |
-| `COMPLETED` | 100% | 完成 |
+| 阶段               | 进度 | 说明                           |
+| ------------------ | ---- | ------------------------------ |
+| `IMPORT`           | 0%   | 视频导入与校验                 |
+| `AUDIO_EXTRACTION` | 10%  | FFmpeg 抽取 16kHz 单声道音频   |
+| `TRANSCRIPTION`    | 45%  | Whisper 转写并落库带时间戳片段 |
+| `SUMMARY`          | 85%  | LLM 生成摘要、要点与章节       |
+| `COMPLETED`        | 100% | 完成                           |
 
 关键设计：
+
 - **按阶段重试**：失败后可从失败阶段重试，已完成阶段的成果不重复计算
 - **重启续跑**：服务启动时将残留的 `PROCESSING` 任务重新置为 `QUEUED` 并入队，
   避免进程崩溃导致任务永久卡死
@@ -117,17 +118,17 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 
 ## REST 接口
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/tasks` | 任务列表 |
-| `POST` | `/api/tasks` | 导入视频（multipart） |
-| `GET` | `/api/tasks/{id}/details` | 任务详情（含转写与摘要结果） |
-| `POST` | `/api/tasks/{id}/cancel` | 取消任务 |
-| `POST` | `/api/tasks/{id}/retry` | 按阶段重试 |
-| `POST` | `/api/tasks/{id}/retranscribe` | 重新转写 |
-| `GET` | `/api/tasks/{id}/video` | 视频流（支持 Range） |
-| `GET` | `/api/tasks/{id}/export/{format}` | 导出 md / json / srt |
-| `DELETE` | `/api/tasks/{id}` | 删除任务及其本地文件 |
+| 方法     | 路径                              | 说明                         |
+| -------- | --------------------------------- | ---------------------------- |
+| `GET`    | `/api/tasks`                      | 任务列表                     |
+| `POST`   | `/api/tasks`                      | 导入视频（multipart）        |
+| `GET`    | `/api/tasks/{id}/details`         | 任务详情（含转写与摘要结果） |
+| `POST`   | `/api/tasks/{id}/cancel`          | 取消任务                     |
+| `POST`   | `/api/tasks/{id}/retry`           | 按阶段重试                   |
+| `POST`   | `/api/tasks/{id}/retranscribe`    | 重新转写                     |
+| `GET`    | `/api/tasks/{id}/video`           | 视频流（支持 Range）         |
+| `GET`    | `/api/tasks/{id}/export/{format}` | 导出 md / json / srt         |
+| `DELETE` | `/api/tasks/{id}`                 | 删除任务及其本地文件         |
 
 ---
 
@@ -199,14 +200,14 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 
 ## 配置项
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `WORKBENCH_STORAGE_DIR` | `./storage` | 视频、音频与模型文件的本机存放目录 |
-| `WORKBENCH_MAX_UPLOAD_BYTES` | 20GB | 单个视频大小上限 |
-| `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 30 | 外部进程超时时间 |
-| `FFMPEG_PATH` | `ffmpeg` | FFmpeg 可执行文件路径 |
-| `WHISPER_MODEL` | `turbo` | Whisper 模型规格 |
-| `CODERPLAN_API_KEY` | 空 | 云端内容服务密钥，留空则跳过摘要阶段 |
+| 变量                                | 默认值      | 说明                                 |
+| ----------------------------------- | ----------- | ------------------------------------ |
+| `WORKBENCH_STORAGE_DIR`             | `./storage` | 视频、音频与模型文件的本机存放目录   |
+| `WORKBENCH_MAX_UPLOAD_BYTES`        | 20GB        | 单个视频大小上限                     |
+| `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 30          | 外部进程超时时间                     |
+| `FFMPEG_PATH`                       | `ffmpeg`    | FFmpeg 可执行文件路径                |
+| `WHISPER_MODEL`                     | `turbo`     | Whisper 模型规格                     |
+| `CODERPLAN_API_KEY`                 | 空          | 云端内容服务密钥，留空则跳过摘要阶段 |
 
 > 密钥仅由后端读取，不会写入日志、前端响应或导出文件。
 
