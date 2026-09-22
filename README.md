@@ -175,7 +175,7 @@ Compose 默认将容器 MySQL 映射到宿主机 `3307`，避免与其他项目�
 
 MySQL 用户和密码只会在空数据卷首次初始化时创建。如果已有旧卷是用其他账号初始化的，请先备份数据，再执行 `docker compose down --volumes` 后重新初始化，或进入 MySQL 手动创建 `.env` 中的 `MYSQL_USER` 并授权；不要为了测试随意删除包含重要视频/数据库的卷。
 
-工作台访问 `http://localhost:5173`，后端访问 `http://localhost:8080`。Compose 会启动 Nginx 前端、Spring Boot 后端、MySQL 8.4；FFmpeg、Python Whisper worker 和模型运行环境都包含在后端镜像中。视频和模型保存在命名卷中，容器重建不会丢失。
+工作台访问 `http://localhost:5174`，后端访问 `http://localhost:8081`。Compose 会启动 Nginx 前端、Spring Boot 后端、MySQL 8.4；FFmpeg、Python Whisper worker 和模型运行环境都包含在后端镜像中。视频和模型保存在命名卷中，容器重建不会丢失。端口可通过 `BACKEND_HOST_PORT` 和 `FRONTEND_HOST_PORT` 修改。
 
 停止容器但保留视频、模型和数据库：
 
@@ -229,7 +229,7 @@ Flyway 会在后端首次连接时自动执行迁移。
 ./mvnw -f backend/pom.xml spring-boot:run     # Windows: mvnw.cmd
 ```
 
-后端监听 `http://localhost:8080`。
+后端监听 `http://localhost:8081`。
 
 ### 4. 启动前端
 
@@ -238,7 +238,7 @@ npm --prefix frontend install
 npm --prefix frontend run dev
 ```
 
-前端监听 `http://localhost:5173`。
+前端监听 `http://localhost:5174`。
 
 ### 5. 运行测试与校验
 

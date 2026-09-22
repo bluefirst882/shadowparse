@@ -15,7 +15,7 @@ services:
       CODERPLAN_BASE_URL: ${CODERPLAN_BASE_URL:-https://api.coderplan.ai/v1}
       CODERPLAN_MODEL: ${CODERPLAN_MODEL:-gpt-5.6-terra}
     ports:
-      - "8080:8080"
+      - "${BACKEND_HOST_PORT:-8081}:8080"
     volumes:
       - video-storage:/app/storage
       - whisper-models:/app/models/whisper
@@ -27,7 +27,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "5173:80"
+      - "${FRONTEND_HOST_PORT:-5174}:80"
     depends_on:
       - backend
     restart: unless-stopped
