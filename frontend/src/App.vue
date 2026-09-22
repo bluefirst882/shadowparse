@@ -49,7 +49,8 @@ async function refresh() {
   }
 }
 async function choose(file: File) {
-  if (!file.type.startsWith('video/')) {
+  const videoExtension = /\.(mp4|mov|mkv|webm|avi)$/i.test(file.name)
+  if (!file.type.startsWith('video/') && !videoExtension) {
     message.value = '请选择视频文件。'
     return false
   }
