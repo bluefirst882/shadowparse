@@ -1,14 +1,46 @@
 services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-video_workbench}
+      MYSQL_USERNAME: ${MYSQL_USER:-video_workbench}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
+      WORKBENCH_STORAGE_DIR: /app/storage
+      WHISPER_MODEL_DIR: /app/models/whisper
+      CODERPLAN_API_KEY: ${CODERPLAN_API_KEY:-}
+      CODERPLAN_BASE_URL: ${CODERPLAN_BASE_URL:-https://api.coderplan.ai/v1}
+      CODERPLAN_MODEL: ${CODERPLAN_MODEL:-gpt-5.6-terra}
+    ports:
+      - "8080:8080"
+    volumes:
+      - video-storage:/app/storage
+      - whisper-models:/app/models/whisper
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
   mysql:
     image: mysql:8.4
-    container_name: video-workbench-mysql
     environment:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-video_workbench}
-      MYSQL_USER: ${MYSQL_USERNAME:-video_workbench}
+      MYSQL_USER: ${MYSQL_USER:-video_workbench}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中设置 MYSQL_ROOT_PASSWORD}
     ports:
-      - '${MYSQL_PORT:-3306}:3306'
+      - '${MYSQL_HOST_PORT:-3307}:3306'
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -26,4 +58,6 @@ services:
       timeout: 5s
       retries: 20
 volumes:
+  video-storage:
+  whisper-models:
   mysql-data:

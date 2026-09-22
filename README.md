@@ -163,6 +163,41 @@ Flyway 自动迁移，共 3 张表：
 
 ## 快速开始
 
+### Docker Compose 全容器启动
+
+复制 `.env.example` 为 `.env`，至少设置 `MYSQL_USER`、`MYSQL_PASSWORD` 和 `MYSQL_ROOT_PASSWORD`，然后执行：
+
+```bash
+docker compose up -d --build
+```
+
+Compose 默认将容器 MySQL 映射到宿主机 `3307`，避免与其他项目占用 `3306` 冲突；后端容器内部仍通过服务名 `mysql:3306` 连接。
+
+MySQL 用户和密码只会在空数据卷首次初始化时创建。如果已有旧卷是用其他账号初始化的，请先备份数据，再执行 `docker compose down --volumes` 后重新初始化，或进入 MySQL 手动创建 `.env` 中的 `MYSQL_USER` 并授权；不要为了测试随意删除包含重要视频/数据库的卷。
+
+工作台访问 `http://localhost:5173`，后端访问 `http://localhost:8080`。Compose 会启动 Nginx 前端、Spring Boot 后端、MySQL 8.4；FFmpeg、Python Whisper worker 和模型运行环境都包含在后端镜像中。视频和模型保存在命名卷中，容器重建不会丢失。
+
+停止容器但保留视频、模型和数据库：
+
+```bash
+docker compose down
+```
+
+结束本次测试并清空本项目数据库、视频、模型卷：
+
+```bash
+docker compose down --volumes --remove-orphans
+```
+
+仅清理本项目构建产生的悬空镜像和构建缓存：
+
+```bash
+docker image prune -f
+docker builder prune -f
+```
+
+不要在日常停止服务时使用 `docker system prune --volumes`，它可能删除其他项目的未使用数据卷。
+
 ### 环境要求
 
 - Java 21、Node.js 20+、Python 3.11+

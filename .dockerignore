@@ -1,0 +1,12 @@
+.git
+.idea
+backend/target
+frontend/node_modules
+frontend/dist
+storage
+storage-real-cn
+models
+artifacts
+*.log
+*.docx
+.env
