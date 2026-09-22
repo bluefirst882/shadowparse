@@ -9,7 +9,9 @@ import org.junit.jupiter.api.Test;
 class ResultValidatorTest {
   private final ResultValidator validator = new ResultValidator();
   private final List<TranscriptSegment> transcript =
-      List.of(new TranscriptSegment(7, 1000, 5000, "第一段", null));
+      List.of(
+          new TranscriptSegment(7, 1000, 5000, "第一段", null),
+          new TranscriptSegment(8, 5000, 9000, "第二段", null));
 
   @Test
   void acceptsChapterInsideReferencedSegment() {
@@ -37,6 +39,35 @@ class ResultValidatorTest {
         () ->
             validator.validate(
                 new TaskResult("摘要", List.of("要点"), List.of(new Chapter(1000, 4000, "开始", 88))),
+                transcript));
+  }
+
+  @Test
+  void acceptsTopicChapterAcrossConsecutiveSegments() {
+    assertDoesNotThrow(
+        () ->
+            validator.validate(
+                new TaskResult("摘要", List.of("要点"), List.of(new Chapter(1200, 8800, "主题", 7, 8L))),
+                transcript));
+  }
+
+  @Test
+  void rejectsChapterWithReversedSourceRange() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            validator.validate(
+                new TaskResult("摘要", List.of("要点"), List.of(new Chapter(1200, 8800, "主题", 8, 7L))),
+                transcript));
+  }
+
+  @Test
+  void rejectsChapterOutsideReferencedRange() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            validator.validate(
+                new TaskResult("摘要", List.of("要点"), List.of(new Chapter(900, 8800, "主题", 7, 8L))),
                 transcript));
   }
 }

@@ -236,6 +236,7 @@ onUnmounted(() => clearInterval(timer))
                   v-if="
                     row.status === 'FAILED' ||
                     row.status === 'CANCELLED' ||
+                    row.status === 'QUEUED' ||
                     row.stage === 'SUMMARY'
                   "
                   link
@@ -316,7 +317,16 @@ onUnmounted(() => clearInterval(timer))
               @click="seek(chapter.startMs)"
             >
               <b>{{ stamp(chapter.startMs) }} · {{ chapter.title }}</b
-              ><small>来源片段 #{{ chapter.sourceSegmentId }}</small>
+              ><small
+                >来源片段 #{{ chapter.sourceSegmentId
+                }}<template
+                  v-if="
+                    chapter.sourceEndSegmentId &&
+                    chapter.sourceEndSegmentId !== chapter.sourceSegmentId
+                  "
+                  >-#{{ chapter.sourceEndSegmentId }}</template
+                ></small
+              >
             </button>
           </aside>
         </section>

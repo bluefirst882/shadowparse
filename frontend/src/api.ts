@@ -22,6 +22,7 @@ export type Chapter = {
   endMs: number
   title: string
   sourceSegmentId: number
+  sourceEndSegmentId?: number
 }
 export type Details = {
   task: Task

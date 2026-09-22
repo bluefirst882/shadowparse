@@ -2,6 +2,7 @@ package ai.toni.videoworkbench;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -10,11 +11,14 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpStatus;
@@ -37,8 +41,10 @@ class TaskService {
   private final ResultValidator resultValidator;
   private final long maxUploadBytes;
   private final long timeoutMinutes;
-  private final ExecutorService queue = Executors.newSingleThreadExecutor();
+  private final int summaryMaxInputChars;
+  private final ExecutorService queue;
   private final Map<String, Process> runningProcesses = new ConcurrentHashMap<>();
+  private final Set<String> scheduledTasks = ConcurrentHashMap.newKeySet();
 
   TaskService(
       TaskRepository tasks,
@@ -53,7 +59,9 @@ class TaskService {
       @Value("${workbench.whisper-model-dir}") String whisperModelDir,
       @Value("${workbench.coderplan.api-key:}") String coderplanApiKey,
       @Value("${workbench.max-upload-bytes}") long maxUploadBytes,
-      @Value("${workbench.process-timeout-minutes}") long timeoutMinutes) {
+      @Value("${workbench.process-timeout-minutes}") long timeoutMinutes,
+      @Value("${workbench.coderplan.max-input-chars:60000}") int summaryMaxInputChars,
+      @Value("${workbench.queue-capacity:10}") int queueCapacity) {
     this.tasks = tasks;
     this.json = json;
     this.coderplan = coderplan;
@@ -67,6 +75,10 @@ class TaskService {
     this.coderplanApiKey = coderplanApiKey;
     this.maxUploadBytes = maxUploadBytes;
     this.timeoutMinutes = timeoutMinutes;
+    this.summaryMaxInputChars = summaryMaxInputChars;
+    this.queue =
+        new ThreadPoolExecutor(
+            1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queueCapacity));
   }
 
   List<VideoTask> list() {
@@ -92,10 +104,12 @@ class TaskService {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请选择有效的视频文件");
     if (file.getSize() > maxUploadBytes)
       throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "视频文件超过允许大小");
+    Path target = null;
+    boolean persisted = false;
     try {
       Files.createDirectories(storage);
       String id = UUID.randomUUID().toString();
-      Path target = storage.resolve(id + extension(file.getOriginalFilename()));
+      target = storage.resolve(id + extension(file.getOriginalFilename()));
       file.transferTo(target);
       Instant now = Instant.now();
       VideoTask task =
@@ -111,16 +125,35 @@ class TaskService {
               now,
               now);
       tasks.save(task);
-      enqueue(id);
-      return task;
+      persisted = true;
+      if (tryEnqueue(id)) return task;
+      String message = "处理队列已满，任务已保存，可稍后重试";
+      tasks.update(id, TaskStatus.QUEUED, TaskStage.IMPORT, 0, message);
+      return new VideoTask(
+          task.id(),
+          task.fileName(),
+          task.videoPath(),
+          task.sizeBytes(),
+          task.status(),
+          task.stage(),
+          task.progress(),
+          message,
+          task.createdAt(),
+          Instant.now());
     } catch (IOException ex) {
+      deleteIfExists(target);
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "无法保存视频文件");
+    } catch (RuntimeException ex) {
+      // A database failure must not leave an uploaded file without a task record.
+      if (!persisted) deleteIfExists(target);
+      throw ex;
     }
   }
 
   void cancel(String id) {
     get(id);
-    tasks.cancel(id);
+    if (!tasks.cancel(id))
+      throw new ResponseStatusException(HttpStatus.CONFLICT, "只能取消排队中或正在处理的任务");
     Process process = runningProcesses.remove(id);
     if (process != null) process.destroyForcibly();
   }
@@ -128,7 +161,11 @@ class TaskService {
   void retry(String id) {
     VideoTask task = get(id);
     if (task.status() == TaskStatus.PROCESSING)
-      throw new ResponseStatusException(HttpStatus.CONFLICT, "任务正在处理");
+      throw new ResponseStatusException(HttpStatus.CONFLICT, "任务已在队列中或正在处理");
+    if (task.status() == TaskStatus.QUEUED) {
+      enqueue(id);
+      return;
+    }
     tasks.reset(
         id,
         task.stage() == TaskStage.SUMMARY || task.stage() == TaskStage.COMPLETED
@@ -140,8 +177,13 @@ class TaskService {
   void retranscribe(String id) {
     VideoTask task = get(id);
     if (task.status() == TaskStatus.PROCESSING)
-      throw new ResponseStatusException(HttpStatus.CONFLICT, "任务正在处理");
+      throw new ResponseStatusException(HttpStatus.CONFLICT, "任务已在队列中或正在处理");
+    if (task.status() == TaskStatus.QUEUED) {
+      enqueue(id);
+      return;
+    }
     tasks.reset(id, TaskStage.IMPORT);
+    tasks.deleteResult(id);
     enqueue(id);
   }
 
@@ -149,24 +191,72 @@ class TaskService {
     VideoTask task = get(id);
     Process process = runningProcesses.remove(id);
     if (process != null) process.destroyForcibly();
+    IOException cleanupFailure = null;
     try {
       Files.deleteIfExists(Path.of(task.videoPath()));
     } catch (IOException ignored) {
+      cleanupFailure = ignored;
+    }
+    try {
+      Files.deleteIfExists(audioPath(id));
+    } catch (IOException ex) {
+      if (cleanupFailure == null) cleanupFailure = ex;
+    }
+    if (cleanupFailure != null) {
+      throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "本地文件清理失败，任务记录已保留");
     }
     tasks.delete(id);
   }
 
   private void enqueue(String id) {
-    queue.submit(() -> process(id));
+    if (!tryEnqueue(id))
+      throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "处理队列已满，请稍后重试");
+  }
+
+  private boolean tryEnqueue(String id) {
+    if (!scheduledTasks.add(id))
+      throw new ResponseStatusException(HttpStatus.CONFLICT, "任务已在队列中或正在处理");
+    try {
+      queue.execute(
+          () -> {
+            try {
+              process(id);
+            } finally {
+              scheduledTasks.remove(id);
+            }
+          });
+      return true;
+    } catch (java.util.concurrent.RejectedExecutionException ex) {
+      scheduledTasks.remove(id);
+      return false;
+    }
+  }
+
+  @PreDestroy
+  void stop() {
+    runningProcesses.values().forEach(Process::destroyForcibly);
+    runningProcesses.clear();
+    queue.shutdownNow();
   }
 
   void recoverAfterRestart() {
     tasks.markProcessingAsQueued();
-    tasks.recoverable().forEach(task -> enqueue(task.id()));
+    tasks
+        .recoverable()
+        .forEach(
+            task -> {
+              try {
+                enqueue(task.id());
+              } catch (ResponseStatusException ignored) {
+                // It remains QUEUED and can be retried after the bounded local queue drains.
+              }
+            });
   }
 
   private void process(String id) {
-    VideoTask task = get(id);
+    VideoTask task = tasks.find(id).orElse(null);
+    if (task == null) return;
+    if (!tasks.claimForProcessing(id)) return;
     TaskStage currentStage = task.stage();
     try {
       if (currentStage == TaskStage.SUMMARY) {
@@ -176,7 +266,7 @@ class TaskService {
       checkCancelled(id);
       tasks.update(id, TaskStatus.PROCESSING, TaskStage.AUDIO_EXTRACTION, 10, null);
       currentStage = TaskStage.AUDIO_EXTRACTION;
-      Path audio = storage.resolve(id + ".wav");
+      Path audio = audioPath(id);
       run(
           id,
           List.of(
@@ -210,6 +300,7 @@ class TaskService {
       tasks.update(id, TaskStatus.COMPLETED, TaskStage.SUMMARY, 100, "本地转写已完成；请配置摘要服务后单独重试内容生成");
     } catch (Cancelled ignored) {
       tasks.update(id, TaskStatus.CANCELLED, currentStage, 0, null);
+      deleteAudio(id);
     } catch (Exception ex) {
       String detail = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
       tasks.update(id, TaskStatus.FAILED, currentStage, 0, "本地处理失败：" + tail(detail));
@@ -233,7 +324,7 @@ class TaskService {
     }
     try {
       tasks.update(id, TaskStatus.PROCESSING, TaskStage.SUMMARY, 85, null);
-      TaskResult result = coderplan.summarize(transcript);
+      TaskResult result = coderplan.summarize(transcript, summaryMaxInputChars);
       checkCancelled(id);
       resultValidator.validate(result, transcript);
       tasks.saveResult(id, result);
@@ -304,6 +395,27 @@ class TaskService {
 
   private void checkCancelled(String id) {
     if (tasks.cancelled(id)) throw new Cancelled();
+  }
+
+  private Path audioPath(String id) {
+    return storage.resolve(id + ".wav");
+  }
+
+  private void deleteAudio(String id) {
+    try {
+      Files.deleteIfExists(audioPath(id));
+    } catch (IOException ignored) {
+      // Cancellation state is still durable even if an OS file lock delays cleanup.
+    }
+  }
+
+  private void deleteIfExists(Path path) {
+    if (path == null) return;
+    try {
+      Files.deleteIfExists(path);
+    } catch (IOException ignored) {
+      // Best-effort cleanup after a failed import.
+    }
   }
 
   private boolean isVideo(String type, String name) {

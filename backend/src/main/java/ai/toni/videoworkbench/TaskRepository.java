@@ -11,6 +11,7 @@ import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 @Repository
 class TaskRepository {
@@ -72,11 +73,12 @@ class TaskRepository {
         id);
   }
 
-  void cancel(String id) {
-    jdbc.update(
-        "update tasks set cancelled=true,status='CANCELLED',updated_at=? where id=?",
-        Timestamp.from(Instant.now()),
-        id);
+  boolean cancel(String id) {
+    return jdbc.update(
+            "update tasks set cancelled=true,status='CANCELLED',updated_at=? where id=? and status in ('QUEUED','PROCESSING')",
+            Timestamp.from(Instant.now()),
+            id)
+        == 1;
   }
 
   void reset(String id, TaskStage stage) {
@@ -87,12 +89,21 @@ class TaskRepository {
         id);
   }
 
+  boolean claimForProcessing(String id) {
+    return jdbc.update(
+            "update tasks set status='PROCESSING',updated_at=? where id=? and status='QUEUED' and cancelled=false",
+            Timestamp.from(Instant.now()),
+            id)
+        == 1;
+  }
+
   void markProcessingAsQueued() {
     jdbc.update(
         "update tasks set status='QUEUED',updated_at=? where status='PROCESSING' and cancelled=false",
         Timestamp.from(Instant.now()));
   }
 
+  @Transactional
   void replaceSegments(String taskId, List<TranscriptSegment> segments) {
     jdbc.update("delete from transcript_segments where task_id=?", taskId);
     for (TranscriptSegment segment : segments)
@@ -103,6 +114,13 @@ class TaskRepository {
           segment.endMs(),
           segment.text(),
           segment.translation());
+    // A summary refers to the previous transcript version and must never be shown with new
+    // segments.
+    jdbc.update("delete from task_results where task_id=?", taskId);
+  }
+
+  void deleteResult(String taskId) {
+    jdbc.update("delete from task_results where task_id=?", taskId);
   }
 
   void replaceTranslations(String taskId, List<TranscriptSegment> segments) {
