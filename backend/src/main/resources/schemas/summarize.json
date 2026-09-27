@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "required": ["summary", "keyPoints", "chapters"],
+  "properties": {
+    "summary": { "type": "string" },
+    "keyPoints": { "type": "array", "items": { "type": "string" } },
+    "chapters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "startMs",
+          "endMs",
+          "title",
+          "sourceSegmentId",
+          "sourceEndSegmentId",
+          "quote"
+        ],
+        "properties": {
+          "startMs": { "type": "integer" },
+          "endMs": { "type": "integer" },
+          "title": { "type": "string" },
+          "sourceSegmentId": { "type": "integer" },
+          "sourceEndSegmentId": { "type": "integer" },
+          "quote": { "type": "string" }
+        }
+      }
+    }
+  }
+}

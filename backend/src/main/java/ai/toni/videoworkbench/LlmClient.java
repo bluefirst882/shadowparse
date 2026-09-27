@@ -313,18 +313,46 @@ class LlmClient {
             .build();
     JsonNode response = send(request, "内容服务", operation, currentModel);
     String content = response.path("choices").path(0).path("message").path("content").asText();
-    if (content.isBlank()) throw outputFailure(operation, "empty_content", "内容服务未返回结果");
+    StructuredOutput parsed = parseStructured(json, content, schema);
+    if (!parsed.ok()) throw outputFailure(operation, parsed.reason(), parsed.message());
+    return parsed.node();
+  }
+
+  /** 结构化闸门的判定结果：{@code node} 非空表示通过，否则 {@code reason} 为失败分类与可读消息。 */
+  record StructuredOutput(JsonNode node, String reason, String message) {
+    boolean ok() {
+      return node != null;
+    }
+
+    static StructuredOutput accepted(JsonNode node) {
+      return new StructuredOutput(node, null, null);
+    }
+
+    static StructuredOutput rejected(String reason, String message) {
+      return new StructuredOutput(null, reason, message);
+    }
+  }
+
+  /**
+   * 结构化闸门：空内容 / 非法 JSON / 不符 schema 一律返回失败分类，供上层重试与打点。
+   *
+   * <p>做成静态方法并接收调用方的 {@link ObjectMapper}，是为了让 P1-1 的回放评测直接复用同一份实现： 评测与线上跑的是同一道闸门，而不是在评测里另写一份口径。
+   */
+  static StructuredOutput parseStructured(
+      ObjectMapper json, String content, LlmJsonSchema.Schema schema) {
+    if (content == null || content.isBlank())
+      return StructuredOutput.rejected("empty_content", "内容服务未返回结果");
     JsonNode parsed;
     try {
       parsed = json.readTree(extractJson(content));
     } catch (Exception ex) {
-      throw outputFailure(operation, "invalid_json", "内容服务未返回有效 JSON");
+      return StructuredOutput.rejected("invalid_json", "内容服务未返回有效 JSON");
     }
     List<String> violations = LlmJsonSchema.validate(parsed, schema.node());
     if (!violations.isEmpty())
-      throw outputFailure(
-          operation, "schema_violation", "返回结构不符合 JSON Schema：" + String.join("；", violations));
-    return parsed;
+      return StructuredOutput.rejected(
+          "schema_violation", "返回结构不符合 JSON Schema：" + String.join("；", violations));
+    return StructuredOutput.accepted(parsed);
   }
 
   /** 记录一次结构化输出失败（空内容 / 非法 JSON / 结构不符），并按原因打点。 */

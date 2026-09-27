@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "required": ["translations"],
+  "properties": {
+    "translations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "translation"],
+        "properties": {
+          "id": { "type": "integer" },
+          "translation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

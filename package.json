@@ -1,5 +1,6 @@
 {
   "scripts": {
+    "eval:live": "node tools/eval-live.mjs",
     "screenshot": "node screenshot.mjs",
     "screenshot:workbench": "node frontend-screenshot.mjs",
     "screenshot:grafana": "node grafana-screenshot.mjs",
