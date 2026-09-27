@@ -9,6 +9,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -31,58 +32,63 @@ class TaskController {
   }
 
   @GetMapping
-  List<VideoTask> list() {
-    return service.list();
+  List<VideoTask> list(@AuthenticationPrincipal AuthenticatedUser user) {
+    return service.list(user.id());
   }
 
   @GetMapping("/{id}")
-  VideoTask get(@PathVariable String id) {
-    return service.get(id);
+  VideoTask get(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
+    return service.get(id, user.id());
   }
 
   @GetMapping("/{id}/details")
-  TaskDetails details(@PathVariable String id) {
-    return service.details(id);
+  TaskDetails details(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
+    return service.details(id, user.id());
   }
 
   @PostMapping
-  VideoTask create(@RequestParam("file") MultipartFile file) {
-    return service.importVideo(file);
+  VideoTask create(
+      @RequestParam("file") MultipartFile file, @AuthenticationPrincipal AuthenticatedUser user) {
+    return service.importVideo(file, user.id());
   }
 
   @PostMapping("/{id}/cancel")
-  void cancel(@PathVariable String id) {
-    service.cancel(id);
+  void cancel(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
+    service.cancel(id, user.id());
   }
 
   @PostMapping("/{id}/retry")
-  void retry(@PathVariable String id) {
-    service.retry(id);
+  void retry(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
+    service.retry(id, user.id());
   }
 
   @PostMapping("/{id}/retranscribe")
-  void retranscribe(@PathVariable String id) {
-    service.retranscribe(id);
+  void retranscribe(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
+    service.retranscribe(id, user.id());
   }
 
   @DeleteMapping("/{id}")
-  void delete(@PathVariable String id) {
-    service.delete(id);
+  void delete(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
+    service.delete(id, user.id());
   }
 
   @GetMapping(value = "/{id}/export/{format}", produces = MediaType.TEXT_PLAIN_VALUE)
-  ResponseEntity<String> export(@PathVariable String id, @PathVariable String format) {
+  ResponseEntity<String> export(
+      @PathVariable String id,
+      @PathVariable String format,
+      @AuthenticationPrincipal AuthenticatedUser user) {
     return ResponseEntity.ok()
         .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=video-result." + format)
-        .body(exports.export(id, format));
+        .body(exports.export(id, format, user.id()));
   }
 
   @GetMapping("/{id}/video")
   ResponseEntity<Resource> stream(
       @PathVariable String id,
-      @RequestHeader(value = HttpHeaders.RANGE, required = false) String range)
+      @RequestHeader(value = HttpHeaders.RANGE, required = false) String range,
+      @AuthenticationPrincipal AuthenticatedUser user)
       throws IOException {
-    Resource video = service.video(id);
+    Resource video = service.video(id, user.id());
     long length = video.contentLength();
     if (range == null)
       return ResponseEntity.ok()

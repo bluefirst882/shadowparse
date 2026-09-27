@@ -30,6 +30,7 @@ body {
 .dark .metrics div,
 .dark .task-panel,
 .dark .chapter-panel,
+.dark .auth-panel,
 .dark .panel {
   background: #18232d;
   border-color: #3a4c59;
@@ -97,8 +98,11 @@ body {
   border-left: 1px solid #dce2e7;
   color: #66727f;
 }
-.header .el-button {
+.header .account {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .main {
   max-width: 1360px;
@@ -111,6 +115,27 @@ body {
   align-items: end;
   gap: 16px;
   margin-bottom: 22px;
+}
+.auth-panel {
+  max-width: 360px;
+  margin: 7vh auto 0;
+  padding: 26px;
+  display: grid;
+  gap: 12px;
+  background: #fff;
+  border: 1px solid #dce2e7;
+  border-radius: 7px;
+  box-shadow: 0 8px 26px rgba(20, 37, 53, 0.08);
+}
+.auth-panel h1 {
+  font-size: 21px;
+  margin: 0;
+}
+.auth-panel p {
+  margin: 0;
+}
+.auth-error {
+  color: #c45656;
 }
 .heading p {
   font-size: 12px;
@@ -224,6 +249,14 @@ small {
   width: 100%;
   max-height: 490px;
   background: #17212b;
+}
+.video-error {
+  min-height: 330px;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: #dbe7ef;
+  text-align: center;
 }
 .now {
   position: absolute;

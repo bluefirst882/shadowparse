@@ -1,7 +1,7 @@
 # 本地视频 AI 解析工作台
 
-面向内容创作者的**本地化**视频 AI 解析工作台。导入视频后自动完成音频抽取和语音转写；
-转写完成后可手动触发摘要与章节生成，输出可跳转的带时间戳文稿。
+面向内容创作者的**本地化**视频 AI 解析工作台。导入视频后自动完成音频抽取、语音转写与摘要/章节生成；
+所有任务按账号隔离，登录后只能看到自己的任务。输出可跳转的带时间戳文稿。
 
 设计上**视频与音频全程保留在本机**，仅将纯文本转写结果发送至云端内容服务，
 兼顾隐私与成本；未配置云端密钥时，本地转写能力仍然完整可用。
@@ -23,7 +23,7 @@
 ## 核心流程
 
 ```
-视频导入 → FFmpeg 音频抽取 → Whisper 语音转写 → 手动生成摘要/章节 → 结果校验 → 多格式导出
+视频导入 → FFmpeg 音频抽取 → Whisper 语音转写 → 自动生成摘要/章节 → 结果校验 → 多格式导出
               │                    │                    │                │
           16kHz 单声道        turbo 模型（GPU）     JSON 结构化输出   章节时间轴校验
 ```
@@ -67,6 +67,7 @@
 
 关键设计：
 
+- **一次提交自动跑完**：上传后自动完成音频提取、转写与内容生成，转写结束即串联摘要与章节，无需手动触发；摘要阶段校验不通过会自动重新生成，最多 3 次。
 - **重试边界**：已保留转写的任务可单独重试摘要；其他失败任务从本地处理重新开始。
 - **重启恢复**：服务启动时将残留的 `PROCESSING` 任务改回 `QUEUED` 并尝试入队；队列满时任务保留为 `QUEUED`，可在队列排空后重试。
 - **产物一致性**：任务记录写入失败时回收刚上传的视频；删除任务时若本地视频或音频清理失败，则保留任务记录并返回错误，避免产生不可追踪的本地文件。
@@ -106,6 +107,18 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 支持三种格式导出：**Markdown**（摘要 + 要点 + 带时间戳全文）、
 **JSON**（完整任务数据）、**SRT**（标准字幕格式，可直接用于视频压制）。
 
+### 6. 账号鉴权与任务归属
+
+自建注册/登录（BCrypt 存密码）+ 无状态 JWT，所有 `/api/tasks/**` 接口都需要令牌：
+
+- **身份来源**：`Authorization: Bearer <token>`；视频流与导出由浏览器直接打开，
+  无法附加请求头，因此这两类接口额外接受 `?access_token=` 查询参数
+- **归属强约束**：`tasks.owner_id` 非空并建索引，列表查询在 SQL 层按 `owner_id` 过滤，
+  按 id 的读写统一走 `where id=? and owner_id=?`，不匹配一律返回 `403`（不区分“不存在”与“不属于你”，避免探测）
+- **状态码语义**：未携带/携带无效令牌返回 `401`，跨账号访问他人任务返回 `403`
+- **前端行为**：令牌存 `localStorage`，401 时自动清除并回到登录页
+- **历史数据**：鉴权上线前的无主任务在迁移中回填给种子账号 `demo`，已有转写与摘要数据保留
+
 ---
 
 ## 项目结构
@@ -115,10 +128,15 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 ├── backend/                         # Spring Boot 后端
 │   └── src/main/
 │       ├── java/ai/toni/videoworkbench/
-│       │   ├── TaskController.java       # REST 接口
+│       │   ├── TaskController.java       # REST 接口（鉴权后按账号隔离）
 │       │   ├── TaskService.java          # 任务编排与外部进程托管
-│       │   ├── TaskRepository.java       # JDBC 数据访问
-│       │   ├── CoderplanClient.java      # LLM 调用（摘要 / 翻译）
+│       │   ├── TaskRepository.java       # JDBC 数据访问（读写强制带 owner）
+│       │   ├── SecurityConfig.java       # Spring Security 过滤链与密码编码器
+│       │   ├── JwtService.java           # JWT 签发与校验
+│       │   ├── JwtAuthenticationFilter.java # 从请求中解析令牌并建立身份
+│       │   ├── AuthController.java       # 注册 / 登录接口
+│       │   ├── UserRepository.java       # 用户数据访问
+│       │   ├── LlmClient.java            # LLM 调用（摘要 / 翻译）
 │       │   ├── ResultValidator.java      # 章节时间轴可信校验
 │       │   ├── ExportService.java        # Markdown / JSON / SRT 导出
 │       │   └── TaskRecovery.java         # 重启后任务恢复
@@ -135,9 +153,14 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 
 ## REST 接口
 
+除 `/api/auth/**` 外，所有接口都需要 `Authorization: Bearer <token>`；
+未携带或令牌无效返回 `401`，访问他人任务返回 `403`。
+
 | 方法     | 路径                              | 说明                         |
 | -------- | --------------------------------- | ---------------------------- |
-| `GET`    | `/api/tasks`                      | 任务列表                     |
+| `POST`   | `/api/auth/register`              | 注册并返回令牌               |
+| `POST`   | `/api/auth/login`                 | 登录并返回令牌               |
+| `GET`    | `/api/tasks`                      | 当前账号的任务列表           |
 | `POST`   | `/api/tasks`                      | 导入视频（multipart）        |
 | `GET`    | `/api/tasks/{id}/details`         | 任务详情（含转写与摘要结果） |
 | `POST`   | `/api/tasks/{id}/cancel`          | 取消任务                     |
@@ -149,15 +172,37 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 
 ---
 
+## 统一错误响应与 traceId
+
+所有接口的错误响应结构统一为 `{code, message, traceId}`，HTTP 状态码保持语义不变（400/401/403/405/409/413/429/500 等）：
+
+```json
+{
+  "code": "FORBIDDEN",
+  "message": "无权访问该任务",
+  "traceId": "8f3c1a2b9d4e4f7799aabbccddeeff00"
+}
+```
+
+- `code`：错误码枚举名（`INVALID_REQUEST` / `UNAUTHORIZED` / `FORBIDDEN` / `NOT_FOUND` / `METHOD_NOT_ALLOWED` / `CONFLICT` / `PAYLOAD_TOO_LARGE` / `QUEUE_FULL` / `INTERNAL_ERROR`），仅作粗分类，精确语义以 HTTP 状态码为准。
+- `message`：面向用户的中文文案，前端直接展示。
+- `traceId`：32 位十六进制追踪号。请求可携带 `X-Trace-Id`（`[A-Za-z0-9-]`，1-64 位）透传，否则由服务端生成；结果会回写到响应头 `X-Trace-Id`（成功响应也带）。
+
+服务端内部异常只返回固定文案，不会把异常信息或堆栈泄漏到响应体，完整堆栈仅记录到后端日志。排查问题时，把响应里的 `traceId` 直接检索后端日志即可定位该次请求；日志格式已通过 `logging.pattern.console`（`%X{traceId:-}`）带上该追踪号。
+
+---
+
 ## 数据库结构
 
-Flyway 自动迁移，共 3 张表：
+Flyway 自动迁移，共 4 张表：
 
-- `tasks` —— 任务主表（状态、阶段、进度、错误信息、取消标记）
+- `users` —— 账号（用户名唯一、BCrypt 密码哈希）
+- `tasks` —— 任务主表（状态、阶段、进度、错误信息、取消标记、归属账号 `owner_id`）
 - `transcript_segments` —— 带起止毫秒的转写片段，含译文列
 - `task_results` —— 摘要、要点 JSON、章节 JSON
 
-外键均为 `ON DELETE CASCADE`，删除任务时自动清理关联数据。
+关联数据外键均为 `ON DELETE CASCADE`，删除任务时自动清理关联数据；
+`tasks.owner_id` 指向 `users(id)`，非空并建有 `(owner_id, created_at)` 索引。
 
 ---
 
@@ -175,7 +220,7 @@ Compose 默认将容器 MySQL 映射到宿主机 `3307`，避免与其他项目�
 
 MySQL 用户和密码只会在空数据卷首次初始化时创建。如果已有旧卷是用其他账号初始化的，请先备份数据，再执行 `docker compose down --volumes` 后重新初始化，或进入 MySQL 手动创建 `.env` 中的 `MYSQL_USER` 并授权；不要为了测试随意删除包含重要视频/数据库的卷。
 
-工作台访问 `http://localhost:5174`，后端访问 `http://localhost:8081`。Compose 会启动 Nginx 前端、Spring Boot 后端、MySQL 8.4；FFmpeg、Python Whisper worker 和模型运行环境都包含在后端镜像中。视频和模型保存在命名卷中，容器重建不会丢失。端口可通过 `BACKEND_HOST_PORT` 和 `FRONTEND_HOST_PORT` 修改。
+工作台访问 `http://localhost:5174`，后端访问 `http://localhost:8081`。Compose 会启动 Nginx 前端、Spring Boot 后端和 MySQL 8.4；Windows 上的 Whisper worker 由 `start-all.ps1` 在宿主机运行，使 PyTorch 能直接使用宿主机 NVIDIA GPU。音视频保存在 `video-storage` 命名卷，MySQL 数据保存在 `mysql-data` 命名卷；模型缓存在 `WHISPER_MODEL_DIR` 指定的宿主机目录。端口可通过 `BACKEND_HOST_PORT` 和 `FRONTEND_HOST_PORT` 修改。
 
 停止容器但保留视频、模型和数据库：
 
@@ -211,34 +256,35 @@ docker builder prune -f
 cp .env.example .env
 ```
 
-填写 `MYSQL_PASSWORD`、`MYSQL_ROOT_PASSWORD`；如需云端摘要能力，
-再填 `CODERPLAN_API_KEY`（**不填也可正常完成本地转写**）。
+填写 `MYSQL_PASSWORD`、`MYSQL_ROOT_PASSWORD`、至少 32 字符的随机
+`WHISPER_SERVICE_TOKEN` 与 `WORKBENCH_JWT_SECRET`；如需云端摘要能力，再填
+`LLM_API_KEY`（不填也可完成本地转写）。
 
-### 2. 数据库
+首次打开 `http://localhost:5174` 会进入登录页，可直接注册账号；迁移同时创建了
+种子账号 `demo`（密码 `demo1234`，仅本地开发用），用于查看鉴权上线前的历史任务，
+登录后请按需修改或改用自建账号。
 
-```bash
-docker compose up -d mysql
+Windows 宿主机首次配置独立的 Python 3.11 GPU 环境：
+
+```powershell
+py -3.11 -m venv E:\model\toni-whisper-venv
+E:\model\toni-whisper-venv\Scripts\python.exe -m pip install --upgrade pip
+E:\model\toni-whisper-venv\Scripts\pip.exe install torch==2.5.1+cu124 --index-url https://download.pytorch.org/whl/cu124
+E:\model\toni-whisper-venv\Scripts\pip.exe install -r workers\requirements.txt
 ```
 
-或使用本地 MySQL 手动创建 `video_workbench` 库与账号。
-Flyway 会在后端首次连接时自动执行迁移。
+默认模型目录为 `E:\model\whisper`。可用 `WHISPER_VENV`、
+`WHISPER_MODEL_DIR` 修改位置，并用 `nvidia-smi` 检查驱动与显卡。
 
-### 3. 启动后端
+### 2. 启动全部服务
 
-```bash
-./mvnw -f backend/pom.xml spring-boot:run     # Windows: mvnw.cmd
+```powershell
+./start-all.ps1
 ```
 
-后端监听 `http://localhost:8081`。
-
-### 4. 启动前端
-
-```bash
-npm --prefix frontend install
-npm --prefix frontend run dev
-```
-
-前端监听 `http://localhost:5174`。
+脚本启动宿主机 Whisper worker 并等待健康检查，再构建、启动 Compose 中的
+Java 后端、前端和 MySQL。前端地址为 `http://localhost:5174`，后端为
+`http://localhost:8081`。停止使用 `./stop-all.ps1`；不会删除模型或数据卷。
 
 ### 5. 运行测试与校验
 
@@ -256,13 +302,23 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | ----------------------------------- | ----------- | ------------------------------------------ |
 | `WORKBENCH_STORAGE_DIR`             | `./storage` | 视频、音频与模型文件的本机存放目录         |
 | `WORKBENCH_MAX_UPLOAD_BYTES`        | 20GB        | 单个视频大小上限                           |
-| `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 30          | 外部进程超时时间                           |
+| `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 180         | 外部进程超时时间；首次下载模型时应保留充足时间 |
 | `FFMPEG_PATH`                       | `ffmpeg`    | FFmpeg 可执行文件路径                      |
 | `WHISPER_MODEL`                     | `turbo`     | Whisper 模型规格                           |
-| `CODERPLAN_API_KEY`                 | 空          | 云端内容服务密钥，留空则跳过摘要阶段       |
-| `CODERPLAN_MAX_INPUT_CHARS`         | 60000       | 单次摘要请求的字符上限，按完整转写片段分批 |
+| `WHISPER_SERVICE_URL`               | `http://host.docker.internal:8090` | 宿主机 Whisper 服务地址 |
+| `WHISPER_MODEL_DIR`                 | `E:/model/whisper` | 宿主机模型缓存目录 |
+| `WORKBENCH_JWT_SECRET`              | 无（必填）  | JWT 签名密钥，至少 32 字符，需自行随机生成 |
+| `WORKBENCH_TOKEN_TTL_HOURS`         | 24          | 令牌有效期（小时）                         |
+| `LLM_API_KEY`                       | 空          | 云端 LLM 密钥，留空则跳过摘要阶段          |
+| `LLM_MAX_INPUT_CHARS`               | 60000       | 单次摘要请求的字符上限，按完整转写片段分批 |
 
 > 密钥仅由后端读取，不会写入日志、前端响应或导出文件。
+
+Docker 不包含 Python、PyTorch、Whisper，也不申请容器 GPU。宿主机 worker
+在 CUDA 可用时使用 NVIDIA GPU，否则回退 CPU。后端通过
+`host.docker.internal:8090` 上传提取后的 WAV 音频，接口由
+`WHISPER_SERVICE_TOKEN` 保护。模型保存在宿主机 `WHISPER_MODEL_DIR`。
+若首次下载因网络中断留下不完整的 `.pt` 文件，重试会重新校验并下载该模型；不要将未完成的文件当作已缓存模型。
 
 ---
 
@@ -273,6 +329,8 @@ MySQL 8.4 隔离容器中 Flyway 迁移执行，以及 1 个真实视频的完�
 （持久化 42 个时间戳片段）、Range 请求返回 `206`、三种格式导出成功。
 
 已验证边界场景：损坏视频、无音轨视频、取消与重启恢复；长文本已通过按完整转写片段分批和单片段超限拒绝校验。
+鉴权与归属已在容器环境实测：无令牌与伪造令牌均返回 `401`；新注册账号调用任务列表、详情、视频流、导出、取消、删除访问种子账号的历史任务全部返回 `403`；迁移将原有 3 条无主任务回填给 `demo` 且 `owner_id` 已收紧为非空（`0` 条空值）；
+前端从登录页到列表、注册新账号后列表为空的完整路径已通过浏览器验证。
 中文真实视频已补充：输入 `E:\Downloads\Video\27210678708-1-192.mp4`，媒体时长 355.947 秒，H.264/AAC；本地 Whisper `turbo`、RTX 4060 Laptop GPU，上传到任务完成约 58 秒，持久化 250 个片段，任务保留为 `COMPLETED/SUMMARY` 并提示摘要可单独重试。检查发现尾部若干片段超出媒体时长，未将该样本表述为时间轴校验通过。以上数据仅对应样本，不能外推为通用成功率或准确率。
 详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 

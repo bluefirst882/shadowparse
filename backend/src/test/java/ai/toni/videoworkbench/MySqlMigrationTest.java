@@ -24,9 +24,17 @@ class MySqlMigrationTest {
         var statement = connection.createStatement();
         var result =
             statement.executeQuery(
-                "select count(*) from information_schema.tables where table_schema = database() and table_name in ('tasks','transcript_segments','task_results')")) {
+                "select count(*) from information_schema.tables where table_schema = database() and table_name in ('tasks','transcript_segments','task_results','users')")) {
       result.next();
-      assertEquals(3, result.getInt(1));
+      assertEquals(4, result.getInt(1));
+    }
+    try (Connection connection = DriverManager.getConnection(url, username, password);
+        var statement = connection.createStatement();
+        var result =
+            statement.executeQuery(
+                "select is_nullable from information_schema.columns where table_schema = database() and table_name = 'tasks' and column_name = 'owner_id'")) {
+      result.next();
+      assertEquals("NO", result.getString(1));
     }
   }
 }

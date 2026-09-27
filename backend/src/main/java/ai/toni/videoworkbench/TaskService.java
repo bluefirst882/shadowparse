@@ -5,6 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -22,22 +26,24 @@ import java.util.concurrent.TimeUnit;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 @Service
 class TaskService {
+  private static final int SUMMARY_ATTEMPTS = 3;
+
   private final TaskRepository tasks;
   private final Path storage;
   private final String ffmpeg;
-  private final String whisperPython;
-  private final String whisperWorker;
+  private final String whisperServiceUrl;
+  private final String whisperServiceToken;
   private final String whisperModel;
-  private final String whisperModelDir;
-  private final String coderplanApiKey;
+  private final String llmApiKey;
   private final ObjectMapper json;
-  private final CoderplanClient coderplan;
+  private final LlmClient llm;
   private final ResultValidator resultValidator;
   private final long maxUploadBytes;
   private final long timeoutMinutes;
@@ -49,30 +55,28 @@ class TaskService {
   TaskService(
       TaskRepository tasks,
       ObjectMapper json,
-      CoderplanClient coderplan,
+      LlmClient llm,
       ResultValidator resultValidator,
       @Value("${workbench.storage-dir}") String storageDir,
       @Value("${workbench.ffmpeg-path}") String ffmpeg,
-      @Value("${workbench.whisper-python}") String whisperPython,
-      @Value("${workbench.whisper-worker}") String whisperWorker,
+      @Value("${workbench.whisper-service-url}") String whisperServiceUrl,
+      @Value("${workbench.whisper-service-token:}") String whisperServiceToken,
       @Value("${workbench.whisper-model}") String whisperModel,
-      @Value("${workbench.whisper-model-dir}") String whisperModelDir,
-      @Value("${workbench.coderplan.api-key:}") String coderplanApiKey,
+      @Value("${workbench.llm.api-key:}") String llmApiKey,
       @Value("${workbench.max-upload-bytes}") long maxUploadBytes,
       @Value("${workbench.process-timeout-minutes}") long timeoutMinutes,
-      @Value("${workbench.coderplan.max-input-chars:60000}") int summaryMaxInputChars,
+      @Value("${workbench.llm.max-input-chars:60000}") int summaryMaxInputChars,
       @Value("${workbench.queue-capacity:10}") int queueCapacity) {
     this.tasks = tasks;
     this.json = json;
-    this.coderplan = coderplan;
+    this.llm = llm;
     this.resultValidator = resultValidator;
     this.storage = Path.of(storageDir);
     this.ffmpeg = ffmpeg;
-    this.whisperPython = whisperPython;
-    this.whisperWorker = whisperWorker;
+    this.whisperServiceUrl = whisperServiceUrl;
+    this.whisperServiceToken = whisperServiceToken;
     this.whisperModel = whisperModel;
-    this.whisperModelDir = whisperModelDir;
-    this.coderplanApiKey = coderplanApiKey;
+    this.llmApiKey = llmApiKey;
     this.maxUploadBytes = maxUploadBytes;
     this.timeoutMinutes = timeoutMinutes;
     this.summaryMaxInputChars = summaryMaxInputChars;
@@ -81,25 +85,23 @@ class TaskService {
             1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queueCapacity));
   }
 
-  List<VideoTask> list() {
-    return tasks.all();
+  List<VideoTask> list(String ownerId) {
+    return tasks.all(ownerId);
   }
 
-  VideoTask get(String id) {
-    return tasks
-        .find(id)
-        .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在"));
+  VideoTask get(String id, String ownerId) {
+    return tasks.findOwned(id, ownerId).orElseThrow(() -> new AccessDeniedException("无权访问该任务"));
   }
 
-  TaskDetails details(String id) {
-    return new TaskDetails(get(id), tasks.segments(id), tasks.result(id).orElse(null));
+  TaskDetails details(String id, String ownerId) {
+    return new TaskDetails(get(id, ownerId), tasks.segments(id), tasks.result(id).orElse(null));
   }
 
-  FileSystemResource video(String id) {
-    return new FileSystemResource(get(id).videoPath());
+  FileSystemResource video(String id, String ownerId) {
+    return new FileSystemResource(get(id, ownerId).videoPath());
   }
 
-  VideoTask importVideo(MultipartFile file) {
+  VideoTask importVideo(MultipartFile file, String ownerId) {
     if (file.isEmpty() || !isVideo(file.getContentType(), file.getOriginalFilename()))
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请选择有效的视频文件");
     if (file.getSize() > maxUploadBytes)
@@ -124,7 +126,7 @@ class TaskService {
               null,
               now,
               now);
-      tasks.save(task);
+      tasks.save(task, ownerId);
       persisted = true;
       if (tryEnqueue(id)) return task;
       String message = "处理队列已满，任务已保存，可稍后重试";
@@ -150,16 +152,16 @@ class TaskService {
     }
   }
 
-  void cancel(String id) {
-    get(id);
+  void cancel(String id, String ownerId) {
+    get(id, ownerId);
     if (!tasks.cancel(id))
       throw new ResponseStatusException(HttpStatus.CONFLICT, "只能取消排队中或正在处理的任务");
     Process process = runningProcesses.remove(id);
     if (process != null) process.destroyForcibly();
   }
 
-  void retry(String id) {
-    VideoTask task = get(id);
+  void retry(String id, String ownerId) {
+    VideoTask task = get(id, ownerId);
     if (task.status() == TaskStatus.PROCESSING)
       throw new ResponseStatusException(HttpStatus.CONFLICT, "任务已在队列中或正在处理");
     if (task.status() == TaskStatus.QUEUED) {
@@ -174,8 +176,8 @@ class TaskService {
     enqueue(id);
   }
 
-  void retranscribe(String id) {
-    VideoTask task = get(id);
+  void retranscribe(String id, String ownerId) {
+    VideoTask task = get(id, ownerId);
     if (task.status() == TaskStatus.PROCESSING)
       throw new ResponseStatusException(HttpStatus.CONFLICT, "任务已在队列中或正在处理");
     if (task.status() == TaskStatus.QUEUED) {
@@ -187,8 +189,8 @@ class TaskService {
     enqueue(id);
   }
 
-  void delete(String id) {
-    VideoTask task = get(id);
+  void delete(String id, String ownerId) {
+    VideoTask task = get(id, ownerId);
     Process process = runningProcesses.remove(id);
     if (process != null) process.destroyForcibly();
     IOException cleanupFailure = null;
@@ -284,20 +286,10 @@ class TaskService {
       tasks.update(id, TaskStatus.PROCESSING, TaskStage.TRANSCRIPTION, 45, null);
       currentStage = TaskStage.TRANSCRIPTION;
       // Worker emits JSON to stdout; production parser persists each timestamped segment here.
-      String output =
-          run(
-              id,
-              List.of(
-                  whisperPython,
-                  whisperWorker,
-                  audio.toString(),
-                  "--model",
-                  whisperModel,
-                  "--model-dir",
-                  whisperModelDir));
-      persistTranscript(id, output);
+      persistTranscript(id, runWhisper(id, audio));
       checkCancelled(id);
-      tasks.update(id, TaskStatus.COMPLETED, TaskStage.SUMMARY, 100, "本地转写已完成；请配置摘要服务后单独重试内容生成");
+      // 转写完成后直接串联内容生成，无需用户手动触发。
+      generateContent(id);
     } catch (Cancelled ignored) {
       tasks.update(id, TaskStatus.CANCELLED, currentStage, 0, null);
       deleteAudio(id);
@@ -308,13 +300,9 @@ class TaskService {
   }
 
   private void generateContent(String id) {
-    if (coderplanApiKey.isBlank() || !coderplan.configured()) {
+    if (llmApiKey.isBlank() || !llm.configured()) {
       tasks.update(
-          id,
-          TaskStatus.COMPLETED,
-          TaskStage.SUMMARY,
-          100,
-          "未配置 CODERPLAN_API_KEY；本地转写已保留，可配置后重试。");
+          id, TaskStatus.COMPLETED, TaskStage.SUMMARY, 100, "未配置 LLM_API_KEY；本地转写已保留，可配置后重试。");
       return;
     }
     List<TranscriptSegment> transcript = tasks.segments(id);
@@ -324,16 +312,32 @@ class TaskService {
     }
     try {
       tasks.update(id, TaskStatus.PROCESSING, TaskStage.SUMMARY, 85, null);
-      TaskResult result = coderplan.summarize(transcript, summaryMaxInputChars);
-      checkCancelled(id);
-      resultValidator.validate(result, transcript);
+      // 云端模型输出不稳定，校验不通过时自动重新生成，最多 SUMMARY_ATTEMPTS 次。
+      TaskResult result = null;
+      Exception failure = null;
+      for (int attempt = 0; attempt < SUMMARY_ATTEMPTS && result == null; attempt++) {
+        try {
+          TaskResult candidate = llm.summarize(transcript, summaryMaxInputChars);
+          checkCancelled(id);
+          resultValidator.validate(candidate, transcript);
+          result = candidate;
+        } catch (Cancelled ex) {
+          throw ex;
+        } catch (Exception ex) {
+          failure = ex;
+        }
+      }
+      if (result == null) throw failure;
       tasks.saveResult(id, result);
       checkCancelled(id);
       tasks.update(id, TaskStatus.COMPLETED, TaskStage.COMPLETED, 100, null);
     } catch (Cancelled ignored) {
       tasks.update(id, TaskStatus.CANCELLED, TaskStage.SUMMARY, 0, null);
     } catch (Exception ex) {
-      tasks.update(id, TaskStatus.FAILED, TaskStage.SUMMARY, 100, "内容生成失败，本地转写已保留，可稍后重试。");
+      String detail =
+          ex.getMessage() == null ? ex.getClass().getSimpleName() : tail(ex.getMessage());
+      tasks.update(
+          id, TaskStatus.FAILED, TaskStage.SUMMARY, 100, "内容生成失败：" + detail + "；本地转写已保留，可稍后重试。");
     }
   }
 
@@ -375,6 +379,27 @@ class TaskService {
     return compact.length() <= 240 ? compact : compact.substring(compact.length() - 240);
   }
 
+  private String runWhisper(String id, Path audio) throws IOException, InterruptedException {
+    if (whisperServiceToken.isBlank()) throw new IOException("WHISPER_SERVICE_TOKEN 未配置");
+    HttpRequest request =
+        HttpRequest.newBuilder(URI.create(whisperServiceUrl + "/transcribe"))
+            .timeout(java.time.Duration.ofMinutes(timeoutMinutes))
+            .header("Content-Type", "audio/wav")
+            .header("X-Whisper-Token", whisperServiceToken)
+            .header("X-Whisper-Model", whisperModel)
+            .POST(HttpRequest.BodyPublishers.ofFile(audio))
+            .build();
+    HttpResponse<String> response =
+        HttpClient.newBuilder()
+            .connectTimeout(java.time.Duration.ofSeconds(10))
+            .build()
+            .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    if (tasks.cancelled(id)) throw new Cancelled();
+    if (response.statusCode() / 100 != 2)
+      throw new IOException("Whisper 服务失败：" + tail(response.body()));
+    return response.body();
+  }
+
   private void persistTranscript(String id, String output) throws Exception {
     JsonNode root = json.readTree(output);
     JsonNode segments = root.path("segments");
@@ -389,8 +414,8 @@ class TaskService {
     }
     if (saved.isEmpty()) throw new IOException("转写内容为空");
     tasks.replaceSegments(id, saved);
-    if (!root.path("language").asText().startsWith("zh") && coderplan.configured())
-      tasks.replaceTranslations(id, coderplan.translateToChinese(tasks.segments(id)));
+    if (!root.path("language").asText().startsWith("zh") && llm.configured())
+      tasks.replaceTranslations(id, llm.translateToChinese(tasks.segments(id)));
   }
 
   private void checkCancelled(String id) {

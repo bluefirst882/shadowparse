@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import {
   ArrowLeft,
   Delete,
@@ -7,10 +7,11 @@ import {
   Moon,
   RefreshRight,
   Sunny,
+  SwitchButton,
   UploadFilled,
   VideoPlay
 } from '@element-plus/icons-vue'
-import { api, type Details, type Task } from './api'
+import { ApiError, api, token, type Details, type Task } from './api'
 const tasks = ref<Task[]>([]),
   selected = ref<Details>(),
   loading = ref(false),
@@ -18,7 +19,13 @@ const tasks = ref<Task[]>([]),
   message = ref(''),
   query = ref(''),
   transcriptQuery = ref(''),
-  currentMs = ref(0)
+  currentMs = ref(0),
+  videoError = ref(false)
+const authed = ref(Boolean(token.get())),
+  registerMode = ref(false),
+  authBusy = ref(false),
+  authError = ref('')
+const form = reactive({ username: '', password: '' })
 const dark = ref(false)
 const visible = computed(() =>
   tasks.value.filter((t) =>
@@ -42,11 +49,63 @@ async function refresh() {
   loading.value = true
   try {
     tasks.value = await api.list()
-  } catch {
-    message.value = '无法连接本地服务，请确认后端已启动。'
+    if (selected.value) {
+      const current = tasks.value.find((task) => task.id === selected.value?.task.id)
+      if (current) selected.value = await api.details(current.id)
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      signOut('登录已过期，请重新登录。')
+      return
+    }
+    message.value = describe(error, '无法连接本地服务，请确认后端已启动。')
   } finally {
     loading.value = false
   }
+}
+async function submitAuth() {
+  authError.value = ''
+  authBusy.value = true
+  try {
+    const result = registerMode.value
+      ? await api.register(form.username, form.password)
+      : await api.login(form.username, form.password)
+    token.set(result.token)
+    authed.value = true
+    form.password = ''
+    await refresh()
+    startPolling()
+  } catch (error) {
+    authError.value = authMessage(error)
+  } finally {
+    authBusy.value = false
+  }
+}
+function describe(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback
+  return error instanceof ApiError && error.traceId
+    ? `${error.message}（追踪号 ${error.traceId}）`
+    : error.message
+}
+function authMessage(error: unknown) {
+  if (!(error instanceof ApiError))
+    return error instanceof Error ? error.message : '无法连接本地服务，请确认后端已启动。'
+  if (error.status === 409) return '用户名已存在，请更换或直接登录。'
+  if (error.status === 400) return '用户名需为 3-32 位字母、数字或下划线，密码至少 8 位。'
+  if (error.status === 401) return '用户名或密码错误。'
+  return describe(error, error.message)
+}
+function signOut(reason = '') {
+  token.clear()
+  authed.value = false
+  tasks.value = []
+  selected.value = undefined
+  authError.value = reason
+  stopPolling()
+}
+function switchAuthMode() {
+  registerMode.value = !registerMode.value
+  authError.value = ''
 }
 async function choose(file: File) {
   const videoExtension = /\.(mp4|mov|mkv|webm|avi)$/i.test(file.name)
@@ -59,8 +118,8 @@ async function choose(file: File) {
     await api.upload(file)
     message.value = '视频已加入本地处理队列。'
     await refresh()
-  } catch {
-    message.value = '导入失败，请检查文件后重试。'
+  } catch (error) {
+    message.value = describe(error, '导入失败，请检查文件后重试。')
   } finally {
     uploading.value = false
   }
@@ -75,16 +134,17 @@ async function action(
     if (selected.value?.task.id === task.id && type === 'remove')
       selected.value = undefined
     await refresh()
-  } catch {
-    message.value = '操作未完成，请稍后重试。'
+  } catch (error) {
+    message.value = describe(error, '操作未完成，请稍后重试。')
   }
 }
 async function openTask(task: Task) {
   try {
+    videoError.value = false
     selected.value = await api.details(task.id)
     transcriptQuery.value = ''
-  } catch {
-    message.value = '无法读取任务详情。'
+  } catch (error) {
+    message.value = describe(error, '无法读取任务详情。')
   }
 }
 function seek(ms: number) {
@@ -107,7 +167,19 @@ function applyTheme(value: boolean) {
   document.documentElement.classList.toggle('dark', value)
   localStorage.setItem('video-workbench-theme', value ? 'dark' : 'light')
 }
-let timer: number
+function removeTask(task: Task) {
+  if (window.confirm(`确定删除“${task.fileName}”及其本地文件吗？`))
+    return action(task, 'remove')
+}
+let timer: number | undefined
+function startPolling() {
+  stopPolling()
+  timer = window.setInterval(refresh, 3000)
+}
+function stopPolling() {
+  if (timer !== undefined) window.clearInterval(timer)
+  timer = undefined
+}
 onMounted(async () => {
   const saved = localStorage.getItem('video-workbench-theme')
   applyTheme(
@@ -115,23 +187,56 @@ onMounted(async () => {
       ? saved === 'dark'
       : window.matchMedia('(prefers-color-scheme: dark)').matches
   )
+  if (!authed.value) return
   await refresh()
-  timer = window.setInterval(refresh, 3000)
+  startPolling()
 })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(stopPolling)
 </script>
 <template>
   <el-container class="shell"
     ><el-header class="header"
       ><div class="brand"><span></span>瞬析 VideoLab</div>
       <div class="context">本地视频解析工作台</div>
-      <el-button
-        circle
-        :icon="dark ? Sunny : Moon"
-        :aria-label="dark ? '切换为浅色模式' : '切换为暗色模式'"
-        @click="applyTheme(!dark)" /></el-header
-    ><el-main class="main"
-      ><template v-if="!selected"
+      <div class="account"
+        ><el-button v-if="authed" link :icon="SwitchButton" @click="signOut()"
+          >退出登录</el-button
+        ><el-button
+          circle
+          :icon="dark ? Sunny : Moon"
+          :aria-label="dark ? '切换为浅色模式' : '切换为暗色模式'"
+          @click="applyTheme(!dark)" /></div
+    ></el-header>
+    <el-main class="main"
+      ><template v-if="!authed"
+        ><section class="auth-panel">
+          <h1>{{ registerMode ? '注册账号' : '登录' }}</h1>
+          <p class="muted">
+            任务与转写结果按账号隔离，登录后只能看到自己的任务。
+          </p>
+          <el-input
+            v-model="form.username"
+            placeholder="用户名"
+            autocomplete="username"
+            @keyup.enter="submitAuth"
+          />
+          <el-input
+            v-model="form.password"
+            type="password"
+            show-password
+            placeholder="密码"
+            autocomplete="current-password"
+            @keyup.enter="submitAuth"
+          />
+          <p v-if="authError" class="auth-error">{{ authError }}</p>
+          <el-button type="primary" :loading="authBusy" @click="submitAuth">{{
+            registerMode ? '注册并登录' : '登录'
+          }}</el-button>
+          <el-button link type="primary" @click="switchAuthMode">{{
+            registerMode ? '已有账号，去登录' : '还没有账号？注册一个'
+          }}</el-button>
+        </section></template
+      ><template v-else-if="!selected"
         ><section class="heading">
           <div>
             <p>本地优先</p>
@@ -143,7 +248,7 @@ onUnmounted(() => clearInterval(timer))
           <el-upload
             :show-file-list="false"
             :before-upload="choose"
-            accept="video/*"
+            accept="video/*,.mp4,.mov,.mkv,.webm,.avi"
             ><el-button type="primary" :loading="uploading" :icon="UploadFilled"
               >导入视频</el-button
             ></el-upload
@@ -237,7 +342,6 @@ onUnmounted(() => clearInterval(timer))
                   v-if="
                     row.status === 'FAILED' ||
                     row.status === 'CANCELLED' ||
-                    row.status === 'QUEUED' ||
                     row.stage === 'SUMMARY'
                   "
                   link
@@ -255,7 +359,7 @@ onUnmounted(() => clearInterval(timer))
                   type="danger"
                   :icon="Delete"
                   aria-label="删除任务"
-                  @click="action(row, 'remove')" /></template></el-table-column
+                  @click="removeTask(row)" /></template></el-table-column
           ></el-table></section></template
       ><template v-else
         ><section class="detail-head">
@@ -275,6 +379,7 @@ onUnmounted(() => clearInterval(timer))
               :key="format"
               :icon="Download"
               tag="a"
+              download
               :href="
                 api.exportUrl(selected.task.id, format as 'md' | 'json' | 'srt')
               "
@@ -292,14 +397,19 @@ onUnmounted(() => clearInterval(timer))
         <section class="watch-grid">
           <div class="video-wrap">
             <video
+              v-if="!videoError"
               id="video-player"
               controls
               :src="api.videoUrl(selected.task.id)"
+              @error="videoError = true"
               @timeupdate="
                 currentMs =
                   ($event.target as HTMLVideoElement).currentTime * 1000
               "
             />
+            <div v-else class="video-error">
+              本地视频文件不可用，可能是部署前生成的旧任务路径，无法在容器中读取。
+            </div>
             <div class="now">{{ stamp(currentMs) }}</div>
           </div>
           <aside class="chapter-panel">
@@ -355,7 +465,8 @@ onUnmounted(() => clearInterval(timer))
               @click="seek(segment.startMs)"
             >
               <span>{{ stamp(segment.startMs) }}</span
-              ><b>{{ segment.text }}</b> ><small v-if="segment.translation">{{
+              ><b>{{ segment.text }}</b
+              ><small v-if="segment.translation">{{
                 segment.translation
               }}</small>
             </button>
@@ -371,7 +482,7 @@ onUnmounted(() => clearInterval(timer))
               </ul></template
             >
             <p v-else class="muted">
-              本地转写完成后，可在配置 coderplan.ai 后重试“生成内容”阶段。
+              转写完成后会自动生成摘要与章节；若生成失败，可在任务操作中点击“重试”。
             </p>
           </aside>
         </section></template

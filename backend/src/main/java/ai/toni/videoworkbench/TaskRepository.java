@@ -33,8 +33,9 @@ class TaskRepository {
               r.getString("text"),
               r.getString("translation"));
 
-  List<VideoTask> all() {
-    return jdbc.query("select * from tasks order by created_at desc", mapper);
+  List<VideoTask> all(String ownerId) {
+    return jdbc.query(
+        "select * from tasks where owner_id=? order by created_at desc", mapper, ownerId);
   }
 
   List<VideoTask> recoverable() {
@@ -43,14 +44,21 @@ class TaskRepository {
         mapper);
   }
 
+  /** 后台处理线程按任务号取数，不做归属过滤；对外读写一律走 {@link #findOwned}。 */
   Optional<VideoTask> find(String id) {
     return jdbc.query("select * from tasks where id=?", mapper, id).stream().findFirst();
   }
 
-  void save(VideoTask t) {
+  Optional<VideoTask> findOwned(String id, String ownerId) {
+    return jdbc.query("select * from tasks where id=? and owner_id=?", mapper, id, ownerId).stream()
+        .findFirst();
+  }
+
+  void save(VideoTask t, String ownerId) {
     jdbc.update(
-        "insert into tasks(id,file_name,video_path,size_bytes,status,stage,progress,error_message,created_at,updated_at) values(?,?,?,?,?,?,?,?,?,?)",
+        "insert into tasks(id,owner_id,file_name,video_path,size_bytes,status,stage,progress,error_message,created_at,updated_at) values(?,?,?,?,?,?,?,?,?,?,?)",
         t.id(),
+        ownerId,
         t.fileName(),
         t.videoPath(),
         t.sizeBytes(),

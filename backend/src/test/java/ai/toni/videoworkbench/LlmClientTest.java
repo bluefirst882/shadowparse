@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-class CoderplanClientTest {
+class LlmClientTest {
   @Test
   void partitionsAtWholeTranscriptSegmentBoundaries() {
     List<TranscriptSegment> transcript =
@@ -16,7 +16,7 @@ class CoderplanClientTest {
     int oneSegmentLimit = 60;
 
     List<List<TranscriptSegment>> chunks =
-        CoderplanClient.partitionTranscript(transcript, oneSegmentLimit);
+        LlmClient.partitionTranscript(transcript, oneSegmentLimit);
 
     assertEquals(List.of(1L), chunks.getFirst().stream().map(TranscriptSegment::id).toList());
     assertEquals(List.of(2L), chunks.get(1).stream().map(TranscriptSegment::id).toList());
@@ -28,6 +28,6 @@ class CoderplanClientTest {
         List.of(new TranscriptSegment(1, 0, 1000, "很长的转写内容", null));
 
     assertThrows(
-        IllegalArgumentException.class, () -> CoderplanClient.partitionTranscript(transcript, 10));
+        IllegalArgumentException.class, () -> LlmClient.partitionTranscript(transcript, 10));
   }
 }

@@ -11,19 +11,24 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
   flyway.enabled: true
 server.error.include-message: never
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] %logger{36} - %msg%n"
 workbench:
   storage-dir: ${WORKBENCH_STORAGE_DIR:./storage}
   max-upload-bytes: ${WORKBENCH_MAX_UPLOAD_BYTES:21474836480}
   process-timeout-minutes: ${WORKBENCH_PROCESS_TIMEOUT_MINUTES:30}
   queue-capacity: ${WORKBENCH_QUEUE_CAPACITY:10}
   ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
-  whisper-python: ${WHISPER_PYTHON:python}
-  whisper-worker: ${WHISPER_WORKER:../workers/whisper_worker.py}
+  security:
+    jwt-secret: ${WORKBENCH_JWT_SECRET:}
+    token-ttl-hours: ${WORKBENCH_TOKEN_TTL_HOURS:24}
+  whisper-service-url: ${WHISPER_SERVICE_URL:http://127.0.0.1:8090}
+  whisper-service-token: ${WHISPER_SERVICE_TOKEN:}
   whisper-model: ${WHISPER_MODEL:turbo}
-  whisper-model-dir: ${WHISPER_MODEL_DIR:./models/whisper}
-  coderplan:
-    base-url: ${CODERPLAN_BASE_URL:https://api.coderplan.ai/v1}
-    api-key: ${CODERPLAN_API_KEY:}
-    model: ${CODERPLAN_MODEL:gpt-5.6-terra}
-    reasoning-effort: ${CODERPLAN_REASONING_EFFORT:low}
-    max-input-chars: ${CODERPLAN_MAX_INPUT_CHARS:60000}
+  llm:
+    base-url: ${LLM_BASE_URL:https://api.deepseek.com/v1}
+    api-key: ${LLM_API_KEY:}
+    model: ${LLM_MODEL:deepseek-v4-flash}
+    reasoning-effort: ${LLM_REASONING_EFFORT:low}
+    max-input-chars: ${LLM_MAX_INPUT_CHARS:60000}

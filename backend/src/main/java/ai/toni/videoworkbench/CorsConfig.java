@@ -9,7 +9,12 @@ class CorsConfig implements WebMvcConfigurer {
   public void addCorsMappings(CorsRegistry registry) {
     registry
         .addMapping("/api/**")
-        .allowedOrigins("http://localhost:5173")
-        .allowedMethods("GET", "POST", "DELETE");
+        // 5173 is the Vite development server; 5174 is the Docker/Nginx frontend.
+        .allowedOrigins(
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5174")
+        .allowedMethods("GET", "POST", "DELETE", "OPTIONS");
   }
 }

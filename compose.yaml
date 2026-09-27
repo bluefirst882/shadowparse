@@ -10,15 +10,22 @@ services:
       MYSQL_USERNAME: ${MYSQL_USER:-video_workbench}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
       WORKBENCH_STORAGE_DIR: /app/storage
-      WHISPER_MODEL_DIR: /app/models/whisper
-      CODERPLAN_API_KEY: ${CODERPLAN_API_KEY:-}
-      CODERPLAN_BASE_URL: ${CODERPLAN_BASE_URL:-https://api.coderplan.ai/v1}
-      CODERPLAN_MODEL: ${CODERPLAN_MODEL:-gpt-5.6-terra}
+      WHISPER_SERVICE_URL: ${WHISPER_SERVICE_URL:-http://host.docker.internal:8090}
+      WHISPER_SERVICE_TOKEN: ${WHISPER_SERVICE_TOKEN:?请在 .env 中设置 WHISPER_SERVICE_TOKEN}
+      WHISPER_MODEL: ${WHISPER_MODEL:-turbo}
+      WORKBENCH_JWT_SECRET: ${WORKBENCH_JWT_SECRET:?请在 .env 中设置 WORKBENCH_JWT_SECRET}
+      WORKBENCH_TOKEN_TTL_HOURS: ${WORKBENCH_TOKEN_TTL_HOURS:-24}
+      WORKBENCH_PROCESS_TIMEOUT_MINUTES: ${WORKBENCH_PROCESS_TIMEOUT_MINUTES:-180}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
     ports:
       - "${BACKEND_HOST_PORT:-8081}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - video-storage:/app/storage
-      - whisper-models:/app/models/whisper
     depends_on:
       mysql:
         condition: service_healthy
@@ -59,5 +66,4 @@ services:
       retries: 20
 volumes:
   video-storage:
-  whisper-models:
   mysql-data:

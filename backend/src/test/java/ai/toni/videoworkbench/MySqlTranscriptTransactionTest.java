@@ -37,8 +37,12 @@ class MySqlTranscriptTransactionTest {
           TestDatabaseConfig.class, () -> new TestDatabaseConfig(url, username, password));
       context.refresh();
       TaskRepository tasks = context.getBean(TaskRepository.class);
+      JdbcTemplate jdbc = context.getBean(JdbcTemplate.class);
+      UserRepository users = new UserRepository(jdbc);
       String id = UUID.randomUUID().toString();
-      saveTask(tasks, id);
+      String owner = UUID.randomUUID().toString();
+      users.save(new User(owner, "transcript-" + owner.substring(0, 8), "unused-hash"));
+      saveTask(tasks, id, owner);
       try {
         tasks.replaceSegments(id, List.of(new TranscriptSegment(0, 0, 1000, "原始片段", null)));
 
@@ -56,11 +60,12 @@ class MySqlTranscriptTransactionTest {
         assertEquals("原始片段", segments.getFirst().text());
       } finally {
         tasks.delete(id);
+        jdbc.update("delete from users where id=?", owner);
       }
     }
   }
 
-  private void saveTask(TaskRepository tasks, String id) {
+  private void saveTask(TaskRepository tasks, String id, String owner) {
     Instant now = Instant.now();
     tasks.save(
         new VideoTask(
@@ -73,7 +78,8 @@ class MySqlTranscriptTransactionTest {
             0,
             null,
             now,
-            now));
+            now),
+        owner);
   }
 
   @Configuration

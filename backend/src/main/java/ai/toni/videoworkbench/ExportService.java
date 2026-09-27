@@ -16,8 +16,8 @@ class ExportService {
     this.json = json;
   }
 
-  String export(String id, String format) {
-    TaskDetails details = tasks.details(id);
+  String export(String id, String format, String ownerId) {
+    TaskDetails details = tasks.details(id, ownerId);
     return switch (format.toLowerCase(Locale.ROOT)) {
       case "srt" -> srt(details);
       case "md" -> markdown(details);

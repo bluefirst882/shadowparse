@@ -32,6 +32,11 @@ class MySqlTaskConcurrencyTest {
         new TaskRepository(
             new org.springframework.jdbc.core.JdbcTemplate(dataSource(url, username, password)),
             new ObjectMapper());
+    org.springframework.jdbc.core.JdbcTemplate jdbc =
+        new org.springframework.jdbc.core.JdbcTemplate(dataSource(url, username, password));
+    UserRepository users = new UserRepository(jdbc);
+    String owner = UUID.randomUUID().toString();
+    users.save(new User(owner, "concurrency-" + owner.substring(0, 8), "unused-hash"));
     String id = UUID.randomUUID().toString();
     Instant now = Instant.now();
     tasks.save(
@@ -45,7 +50,8 @@ class MySqlTaskConcurrencyTest {
             0,
             null,
             now,
-            now));
+            now),
+        owner);
     ExecutorService workers = Executors.newFixedThreadPool(2);
     CountDownLatch ready = new CountDownLatch(2);
     CountDownLatch start = new CountDownLatch(1);
@@ -62,6 +68,7 @@ class MySqlTaskConcurrencyTest {
       workers.shutdownNow();
       workers.awaitTermination(1, TimeUnit.SECONDS);
       tasks.delete(id);
+      jdbc.update("delete from users where id=?", owner);
     }
   }
 
