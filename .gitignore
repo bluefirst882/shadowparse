@@ -6,12 +6,15 @@ node_modules/
 .npm-cache/
 frontend/node_modules/
 frontend/dist/
+/target/
 backend/target/
 *.log
 __pycache__/
 *.py[cod]
 .env
 .idea/
+.vscode/
+.whisper-worker.pid
 .mvn/wrapper/apache-maven/
 .mvn/wrapper/maven.zip
 
@@ -20,7 +23,7 @@ frame-*.png
 player-detail.png
 video-*.png
 
-# ¸öÈË¼òÀúÎÄ¼ş£¨²»ÊôÓÚ±¾ÏîÄ¿£©
-¶¹Ãú*.docx
-¶¹Ãú*.md
+# ä¸ªäººç®€å†æ–‡ä»¶ï¼ˆä¸å±äºæœ¬é¡¹ç›®ï¼‰
+è±†é“­*.docx
+è±†é“­*.md
 ~\$*.docx
