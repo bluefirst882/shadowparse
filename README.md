@@ -12,7 +12,7 @@
 结果导出及 Vue 前端接口联调，完成从上传到转写、播放定位和导出的后端核心流程与持久化设计。
 
 - 设计 `IMPORT → AUDIO_EXTRACTION → TRANSCRIPTION → SUMMARY → COMPLETED` 分阶段任务流程，使用 MySQL 持久化任务状态和转写片段，使处理进度、失败信息和已有产物可被查询。
-- 使用 `ProcessBuilder` 托管 FFmpeg 与 Whisper，分别异步消费 stdout/stderr，并加入超时终止和退出码诊断，避免外部进程因管道缓冲区写满而阻塞。
+- 使用 `ProcessBuilder` 托管 FFmpeg，异步消费 stdout/stderr，并加入超时终止和退出码诊断，避免外部进程因管道缓冲区写满而阻塞；Whisper 改为常驻 HTTP 服务单独托管。
 - 对 LLM 返回的摘要、要点和章节执行服务端业务校验，检查章节来源片段、时间范围、顺序和重叠，避免直接信任模型生成的时间轴。
 - 在 2 个真实视频样本上完成本地转写验证：英文样本完整转写持久化 42 个带时间戳片段；中文样本（355.947 秒）持久化 250 个带时间戳片段，实测从上传到完成约 58 秒。英文样本的 Range 请求返回 `206 Partial Content`，Markdown、JSON、SRT 三种导出均成功。
 
@@ -74,15 +74,23 @@
 - **转写与摘要解耦**：未配置云端密钥时任务以「本地转写已完成」状态保留，
   配置后可单独重试内容生成，不丢失已完成的转写结果
 
-### 2. 外部进程托管
+### 2. 外部进程与服务托管
 
-FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
+FFmpeg 由 `ProcessBuilder` 托管：
 
 - **独立线程异步消费 stdout / stderr**：避免管道缓冲区写满导致子进程阻塞死锁
 - **超时强杀**：超过配置时限自动 `destroyForcibly`
 - **退出码诊断**：失败时截取 stderr 尾部作为错误信息回传前端
-- stdout 专门用于承载结构化 JSON，推理过程中的日志统一重定向到 stderr，
-  保证父进程解析协议不被污染
+
+Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.py --serve`，
+默认跑在宿主机 GPU 上），后端只通过 HTTP 调用它：
+
+- **调用鉴权**：请求头携带 `X-Whisper-Token`，与后端共享密钥；服务启动时强制要求该密钥
+  至少 32 字符，避免本机其他进程随意调用
+- **设备自述**：`GET /health` 返回当前推理设备（`cuda` / `cpu`），便于确认是否退化到 CPU
+- **输入边界**：按 `Content-Length` 分块落盘并限制体积，超限返回 `413`；转写结束后删除临时音频
+- 当前实现**每次请求都会重新加载模型**，常驻服务省掉的是进程启动开销而非模型加载开销，
+  这是已知的优化点
 
 ### 3. LLM 结构化输出与可信校验
 
@@ -159,7 +167,7 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 │           ├── application.yml
 │           └── db/migration/             # Flyway 迁移脚本
 ├── frontend/                        # Vue 3 + TypeScript 工作台界面
-├── workers/whisper_worker.py        # Whisper 推理进程（输出 JSON）
+├── workers/whisper_worker.py        # Whisper 推理服务（HTTP，/transcribe 与 /health）
 ├── ops/                             # 可观测性栈配置
 │   ├── prometheus/prometheus.yml         # 抓取 backend:8080/actuator/prometheus
 │   └── grafana/                          # 数据源与面板 provisioning（含面板 JSON）
