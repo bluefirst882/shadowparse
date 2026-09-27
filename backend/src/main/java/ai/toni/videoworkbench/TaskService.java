@@ -337,7 +337,10 @@ class TaskService {
         try {
           TaskResult candidate =
               llm.summarize(
-                  transcript, summaryMaxInputChars, failure == null ? null : failure.getMessage());
+                  id,
+                  transcript,
+                  summaryMaxInputChars,
+                  failure == null ? null : failure.getMessage());
           checkCancelled(id);
           resultValidator.validate(candidate, transcript);
           result = candidate;
@@ -449,7 +452,7 @@ class TaskService {
     if (saved.isEmpty()) throw new IOException("转写内容为空");
     tasks.replaceSegments(id, saved);
     if (!root.path("language").asText().startsWith("zh") && llm.configured())
-      tasks.replaceTranslations(id, llm.translateToChinese(tasks.segments(id)));
+      tasks.replaceTranslations(id, llm.translateToChinese(id, tasks.segments(id)));
   }
 
   private void checkCancelled(String id) {

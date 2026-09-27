@@ -21,6 +21,9 @@ services:
       LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
       LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-deepseek-v4-pro}
       LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
+      # 模型单价只影响成本折算，未配置时导出成本为 null（token 用量照常统计）。
+      LLM_PRICES: ${LLM_PRICES:-}
+      LLM_PRICE_CURRENCY: ${LLM_PRICE_CURRENCY:-USD}
     ports:
       - "${BACKEND_HOST_PORT:-8081}:8080"
     extra_hosts:

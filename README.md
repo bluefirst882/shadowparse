@@ -122,6 +122,8 @@ Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.
 支持三种格式导出：**Markdown**（摘要 + 要点 + 带时间戳全文）、
 **JSON**（完整任务数据）、**SRT**（标准字幕格式，可直接用于视频压制）。
 
+另有单视频 LLM 成本导出 `GET /api/tasks/{id}/cost`（见「提示词版本化与成本核算」）。
+
 ### 6. 账号鉴权与任务归属
 
 自建注册/登录（BCrypt 存密码）+ 无状态 JWT，所有 `/api/tasks/**` 接口都需要令牌：
@@ -146,6 +148,50 @@ Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.
 - `limit` 非数字、≤0 或 >100，以及 `cursor` 非法（base64 无法解析、缺少字段、时间戳不合法）都返回 `400`，
   不会静默当成第一页；游标仍在 SQL 层叠加 `owner_id` 过滤，无法借此读到其他账号的任务。
 
+### 8. 提示词版本化与成本核算
+
+提示词不是写死在代码里的字符串，而是会反复迭代、需要按版本比较效果与成本的产物：
+
+- **提示词版本化**：正文放在 `resources/prompts/<名称>.<版本>.system.txt` 与 `.user.txt`
+  （当前 `summarize.v1` / `merge.v1` / `translate.v1`），代码只负责注入 schema 原文、输入文本与「上次失败原因」。
+  资源缺失或占位符没被赋值**启动即失败**，不允许线上出现「提示词少了一半」的静默降级；
+  改措辞就换版本号，评测集与成本都按版本归属，可以直接对比。
+- **调用账目落库**：每次 LLM 响应里的 `usage` 都写进 `llm_calls` 表，记下
+  **任务 id + 提示词版本 `prompt_id` + 实际服务的 `model` + prompt/completion token 数**。
+  记「实际服务的模型」而不是「配置的主模型」，降级到备用模型的调用才会如实归到备用模型名下。
+- **成本折算**：单价必须由使用者通过 `LLM_PRICES` 显式配置，格式
+  `模型:每百万输入token单价:每百万输出token单价`（多条用逗号分隔）。**仓库不内置任何价格**——
+  价格随账号、区域与调价变动，写死在仓库里迟早变成过期数字，还会让「成本」看起来像官方结论。
+  未配置单价的模型只给 token 数、金额为 `null`，不做「按同价估算」的兜底；配置格式非法在启动时直接失败。
+- **成本导出**：`GET /api/tasks/{id}/cost` 按 `prompt_id + model` 分行返回用量与金额；
+  任一行缺单价时总额为 `null`（部分缺失不给总数，避免把残缺数据算成一个看起来完整的数字）。
+- **记账不拖垮主流程**：写账失败只记 WARN，不让一次已经成功的摘要生成因为记账失败而变成失败。
+
+```jsonc
+// GET /api/tasks/f1094e67-…/cost（容器实测，LLM_PRICES=deepseek-v4-flash:0.28:0.42）
+{
+  "taskId": "f1094e67-33da-4038-9935-25557bc50288",
+  "currency": "USD",
+  "promptTokens": 8365,
+  "completionTokens": 18947,
+  "estimatedCost": 0.010300,
+  "lines": [
+    { "promptId": "summarize.v1", "model": "deepseek-v4-flash", "calls": 1,
+      "promptTokens": 3551, "completionTokens": 4758, "estimatedCost": 0.002993 },
+    { "promptId": "translate.v1", "model": "deepseek-v4-flash", "calls": 14,
+      "promptTokens": 4814, "completionTokens": 14189, "estimatedCost": 0.007307 }
+  ]
+}
+```
+
+跨版本对比直接查表即可（`prompt_id` + `model` 上建有索引）：
+
+```sql
+select prompt_id, model, count(*) calls,
+       sum(prompt_tokens) prompt_tokens, sum(completion_tokens) completion_tokens
+from llm_calls group by prompt_id, model order by prompt_id, model;
+```
+
 ---
 
 ## 项目结构
@@ -165,13 +211,21 @@ Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.
 │       │   ├── JwtAuthenticationFilter.java # 从请求中解析令牌并建立身份
 │       │   ├── AuthController.java       # 注册 / 登录接口
 │       │   ├── UserRepository.java       # 用户数据访问
-│       │   ├── LlmClient.java            # LLM 调用（摘要 / 翻译，解析 usage 并打点）
+│       │   ├── LlmClient.java            # LLM 调用（摘要 / 翻译，解析 usage 并落库）
+│       │   ├── LlmUsageRepository.java   # LLM 调用账目（提示词版本 / 模型 / token）
+│       │   ├── LlmCostService.java       # 按提示词版本与模型折算单视频成本
+│       │   ├── LlmPricing.java           # 模型单价解析（LLM_PRICES，仓库不内置价格）
+│       │   ├── TaskCost.java             # 单视频成本导出响应
+│       │   ├── PromptLibrary.java        # 提示词唯一来源（带版本号的资源文件）
+│       │   ├── LlmJsonSchema.java        # JSON Schema 唯一来源（正文在 resources/schemas）
 │       │   ├── WorkbenchMetrics.java     # 指标埋点集中入口（Micrometer）
-│       │   ├── ResultValidator.java      # 章节时间轴可信校验
+│       │   ├── ResultValidator.java      # 章节时间轴与引文可信校验
 │       │   ├── ExportService.java        # Markdown / JSON / SRT 导出
 │       │   └── TaskRecovery.java         # 重启后任务恢复
 │       └── resources/
 │           ├── application.yml
+│           ├── prompts/                  # 带版本号的提示词：<名称>.<版本>.<system|user>.txt
+│           ├── schemas/                  # JSON Schema 正文（Java 服务端与 Node 评测脚本共用）
 │           └── db/migration/             # Flyway 迁移脚本
 ├── frontend/                        # Vue 3 + TypeScript 工作台界面
 ├── workers/whisper_worker.py        # Whisper 推理服务（HTTP，/transcribe 与 /health）
@@ -196,6 +250,7 @@ Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.
 | `GET`    | `/api/tasks?cursor=&limit=`       | 当前账号的任务列表（游标分页） |
 | `POST`   | `/api/tasks`                      | 导入视频（multipart）          |
 | `GET`    | `/api/tasks/{id}/details`         | 任务详情（含转写与摘要结果）   |
+| `GET`    | `/api/tasks/{id}/cost`            | 单视频 LLM 用量与成本（按提示词版本分行） |
 | `POST`   | `/api/tasks/{id}/cancel`          | 取消任务                       |
 | `POST`   | `/api/tasks/{id}/retry`           | 重试摘要或重新执行本地处理     |
 | `POST`   | `/api/tasks/{id}/retranscribe`    | 重新转写                       |
@@ -253,11 +308,11 @@ Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.
 | 模型降级次数 | `workbench.llm.fallbacks`          | `workbench_llm_fallbacks_total`            | 主模型失败后升级到备用模型的次数                                | `operation`、`reason=http_400/timeout/io_error/schema_violation/empty_content/invalid_json` | `LlmClient.requestJson`            |
 | 输出结构失败 | `workbench.llm.output_failures`    | `workbench_llm_output_failures_total`      | 模型输出不可用（空内容 / 非法 JSON / 不符合 schema）的次数，即结构失败率 | `operation`、`reason=empty_content/invalid_json/schema_violation` | `LlmClient.callOnce`               |
 | 校验拦截次数 | `workbench.llm.validation_failures` | `workbench_llm_validation_failures_total` | 结果校验拦下未通过模型输出的次数（反幻觉闸门命中）             | `reason=quote_mismatch` / `quote_missing` / `invalid_chapter_*` 等 | `TaskService.generateContent`      |
-| token 用量   | `workbench.llm.tokens`             | `workbench_llm_tokens_total`               | 从 LLM 响应 `usage` 字段累加的 token 数（仅运行指标，未持久化） | `type=prompt/completion`、`model`          | `LlmClient.recordUsage`            |
+| token 用量   | `workbench.llm.tokens`             | `workbench_llm_tokens_total`               | 从 LLM 响应 `usage` 字段累加的 token 数（同时落库到 `llm_calls`，见「提示词版本化与成本核算」） | `type=prompt/completion`、`model`          | `LlmClient.recordUsage`            |
 | 队列深度     | `workbench.queue.depth`            | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge）                               | 无                                         | `TaskService` 构造函数绑定         |
 | 队列等待时长 | `workbench.queue.wait`             | `workbench_queue_wait_seconds`             | 任务从入队到真正开始执行的等待时长直方图                        | 无                                         | `TaskService.tryEnqueue`           |
 
-- **usage 解析**：`LlmClient` 原实现只取 `choices[0].message.content`，**并不解析 `usage`**；本次补上 `usage.prompt_tokens` / `usage.completion_tokens` 的读取并累加到指标（按要求不做持久化）。
+- **usage 解析**：`LlmClient` 原实现只取 `choices[0].message.content`，**并不解析 `usage`**；先前补上 `usage.prompt_tokens` / `usage.completion_tokens` 的读取并累加到指标，现在同一处还会按「任务 + 提示词版本 + 实际模型」写进 `llm_calls` 表，用于单视频成本导出。
 - **队列指标的可替换性**：`WorkbenchMetrics.bindQueueDepth(Supplier<Number>)` 由 `TaskService` 注入数据源（当前是有界单线程队列的等待任务数）。P2-1 把进程内队列换成 RabbitMQ 时，只改这一处绑定与调用点，指标名与语义保持不变。
 
 ### 启动与看图
@@ -290,14 +345,16 @@ docker compose up -d --wait      # backend / frontend / mysql / prometheus / gra
 
 ## 数据库结构
 
-Flyway 自动迁移，共 4 张表：
+Flyway 自动迁移，共 5 张表：
 
 - `users` —— 账号（用户名唯一、BCrypt 密码哈希）
 - `tasks` —— 任务主表（状态、阶段、进度、错误信息、取消标记、归属账号 `owner_id`）
 - `transcript_segments` —— 带起止毫秒的转写片段，含译文列
 - `task_results` —— 摘要、要点 JSON、章节 JSON
+- `llm_calls` —— LLM 调用账目（任务、提示词版本 `prompt_id`、实际模型 `model`、token 数），
+  供单视频成本导出与按版本对比；建 `(task_id, created_at)` 与 `(prompt_id, model, created_at)` 两个索引
 
-关联数据外键均为 `ON DELETE CASCADE`，删除任务时自动清理关联数据；
+关联数据外键均为 `ON DELETE CASCADE`，删除任务时自动清理关联数据（含 `llm_calls`）；
 `tasks.owner_id` 指向 `users(id)`，非空并建有 `(owner_id, created_at)` 索引。
 
 ---
@@ -409,6 +466,8 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | `LLM_MODEL`                         | `deepseek-v4-flash`                | 主模型                                             |
 | `LLM_FALLBACK_MODEL`                | `deepseek-v4-pro`                  | 主模型失败/超时/结构不可用时升级到的备用模型，留空即关闭降级 |
 | `LLM_MAX_INPUT_CHARS`               | 60000                              | 单次摘要请求的字符上限，按完整转写片段分批         |
+| `LLM_PRICES`                        | 空                                 | 模型单价，格式 `模型:每百万输入token单价:每百万输出token单价`（逗号分隔多条）。留空则只统计 token，成本导出为 `null`；仓库不内置任何价格 |
+| `LLM_PRICE_CURRENCY`                | `USD`                              | 成本导出里的货币标记，随你填入单价的币种调整       |
 | `PROMETHEUS_HOST_PORT`              | 9090                               | Prometheus 映射到宿主机的端口                      |
 | `GRAFANA_HOST_PORT`                 | 3000                               | Grafana 映射到宿主机的端口                         |
 | `GRAFANA_ADMIN_USER`                | `admin`                            | Grafana 管理员账号                                 |
@@ -440,6 +499,13 @@ MySQL 8.4 隔离容器中 Flyway 迁移执行，以及 1 个真实视频的完�
 （转写耗时 `count=2`、LLM 调用成功、token `prompt=12690 / completion=29117`、队列深度抓取到 `2`、队列等待时长有样本），
 Prometheus 目标 `video-workbench-backend` 为 `up`，Grafana 面板与数据源由 provisioning 自动加载；
 额外用一次故障注入（临时失效 `LLM_API_KEY`）验证了 LLM 失败与重试路径。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
+提示词版本化与成本核算同样在容器环境实测：`llm_calls` 表随 V4 迁移建立；对英文任务 `f1094e67-…` 触发一次
+`retranscribe`（107 个转写片段），`GET /api/tasks/{id}/cost` 读出 `summarize.v1` 1 次调用与 `translate.v1` 14 次调用
+（与 `ceil(107 / 8)` 的批次数一致）；未配置 `LLM_PRICES` 时金额为 `null` 而 token 照常统计，
+临时注入**占位**单价 `deepseek-v4-flash:0.28:0.42`（仅为验证折算算术，不是任何官方报价）后金额为
+`0.010300` = `0.002993`（摘要）+ `0.007307`（翻译），可由 token 数手工复核。后端 `mvnw verify` 通过：
+`Tests run: 98, Failures: 0, Errors: 0, Skipped: 3`（3 项 MySQL 集成测试未配置 `MYSQL_TEST_URL` 时跳过），Spotless 通过。
 
 ---
 

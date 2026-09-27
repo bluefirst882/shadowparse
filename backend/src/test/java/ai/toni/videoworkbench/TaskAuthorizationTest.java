@@ -1,8 +1,11 @@
 package ai.toni.videoworkbench;
 
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.List;
@@ -31,6 +34,7 @@ class TaskAuthorizationTest {
 
   @MockitoBean private TaskService service;
   @MockitoBean private ExportService exports;
+  @MockitoBean private LlmCostService costs;
 
   @Test
   void rejectsRequestWithoutToken() throws Exception {
@@ -57,6 +61,29 @@ class TaskAuthorizationTest {
 
     mvc.perform(get("/api/tasks/task-1").header(HttpHeaders.AUTHORIZATION, bearer("user-b")))
         .andExpect(status().isForbidden());
+  }
+
+  @Test
+  void exportsCostOnlyAfterCheckingOwnership() throws Exception {
+    when(costs.costOf("task-1"))
+        .thenReturn(new TaskCost("task-1", "USD", 100, 20, null, List.of()));
+
+    mvc.perform(get("/api/tasks/task-1/cost").header(HttpHeaders.AUTHORIZATION, bearer("user-a")))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.taskId").value("task-1"))
+        .andExpect(jsonPath("$.promptTokens").value(100));
+
+    verify(service).get("task-1", "user-a");
+  }
+
+  @Test
+  void rejectsCostOfAnotherUsersTask() throws Exception {
+    when(service.get(eq("task-1"), eq("user-b"))).thenThrow(new AccessDeniedException("无权访问该任务"));
+
+    mvc.perform(get("/api/tasks/task-1/cost").header(HttpHeaders.AUTHORIZATION, bearer("user-b")))
+        .andExpect(status().isForbidden());
+
+    verifyNoInteractions(costs);
   }
 
   private String bearer(String userId) {

@@ -16,6 +16,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 /**
  * 用本地 HTTP 替身验证 P1-3 的模型降级链：主模型报错、超时类错误或输出结构不可用时升级到备用模型，
@@ -46,7 +47,7 @@ class LlmClientFallbackTest {
                     ? new Stub(400, "model not found")
                     : new Stub(200, validSummary()));
 
-    TaskResult result = client.summarize(transcript(), 60000, null);
+    TaskResult result = client.summarize("task-1", transcript(), 60000, null);
 
     assertEquals("摘要", result.summary());
     assertEquals(List.of(PRIMARY, FALLBACK), requestedModels());
@@ -84,7 +85,7 @@ class LlmClientFallbackTest {
             FALLBACK,
             model -> new Stub(200, model.equals(PRIMARY) ? missingQuote : validSummary()));
 
-    TaskResult result = client.summarize(transcript(), 60000, null);
+    TaskResult result = client.summarize("task-1", transcript(), 60000, null);
 
     assertEquals("摘要", result.summary());
     assertEquals(List.of(PRIMARY, FALLBACK), requestedModels());
@@ -104,7 +105,7 @@ class LlmClientFallbackTest {
         clientFor(
             PRIMARY, FALLBACK, model -> new Stub(200, model.equals(PRIMARY) ? "" : validSummary()));
 
-    client.summarize(transcript(), 60000, null);
+    client.summarize("task-1", transcript(), 60000, null);
 
     assertEquals(1, fallbackCount("empty_content"));
     assertEquals(
@@ -122,7 +123,8 @@ class LlmClientFallbackTest {
 
     LlmClient.LlmApiException failure =
         assertThrows(
-            LlmClient.LlmApiException.class, () -> client.summarize(transcript(), 60000, null));
+            LlmClient.LlmApiException.class,
+            () -> client.summarize("task-1", transcript(), 60000, null));
 
     assertEquals(500, failure.status());
     assertEquals(List.of(PRIMARY, FALLBACK), requestedModels());
@@ -134,7 +136,8 @@ class LlmClientFallbackTest {
     LlmClient client = clientFor(PRIMARY, "", model -> new Stub(500, "boom"));
 
     assertThrows(
-        LlmClient.LlmApiException.class, () -> client.summarize(transcript(), 60000, null));
+        LlmClient.LlmApiException.class,
+        () -> client.summarize("task-1", transcript(), 60000, null));
 
     assertEquals(List.of(PRIMARY), requestedModels());
     assertNull(registry.find(WorkbenchMetrics.LLM_FALLBACKS).counter());
@@ -145,7 +148,8 @@ class LlmClientFallbackTest {
     LlmClient client = clientFor(PRIMARY, PRIMARY, model -> new Stub(500, "boom"));
 
     assertThrows(
-        LlmClient.LlmApiException.class, () -> client.summarize(transcript(), 60000, null));
+        LlmClient.LlmApiException.class,
+        () -> client.summarize("task-1", transcript(), 60000, null));
 
     assertEquals(List.of(PRIMARY), requestedModels());
     assertNull(registry.find(WorkbenchMetrics.LLM_FALLBACKS).counter());
@@ -215,6 +219,7 @@ class LlmClientFallbackTest {
     return new LlmClient(
         json,
         new WorkbenchMetrics(registry),
+        Mockito.mock(LlmUsageRepository.class),
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         primary,

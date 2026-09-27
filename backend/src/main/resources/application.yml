@@ -39,3 +39,7 @@ workbench:
     fallback-model: ${LLM_FALLBACK_MODEL:deepseek-v4-pro}
     reasoning-effort: ${LLM_REASONING_EFFORT:low}
     max-input-chars: ${LLM_MAX_INPUT_CHARS:60000}
+    # 模型单价（每百万 token），只用于把已入库的 usage 折算成金额：
+    # 格式「模型:输入单价:输出单价」，多条用逗号分隔，不配置则只统计 token 不折算金额。
+    prices: ${LLM_PRICES:}
+    price-currency: ${LLM_PRICE_CURRENCY:USD}

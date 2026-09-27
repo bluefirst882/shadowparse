@@ -44,10 +44,12 @@ class LlmClient {
   private final String fallbackModel;
   private final String reasoningEffort;
   private final WorkbenchMetrics metrics;
+  private final LlmUsageRepository usageLog;
 
   LlmClient(
       ObjectMapper json,
       WorkbenchMetrics metrics,
+      LlmUsageRepository usageLog,
       @Value("${workbench.llm.base-url}") String baseUrl,
       @Value("${workbench.llm.api-key}") String apiKey,
       @Value("${workbench.llm.model}") String model,
@@ -55,6 +57,7 @@ class LlmClient {
       @Value("${workbench.llm.reasoning-effort}") String reasoningEffort) {
     this.json = json;
     this.metrics = metrics;
+    this.usageLog = usageLog;
     this.baseUrl = baseUrl.replaceAll("/+$", "");
     this.apiKey = apiKey;
     this.model = model;
@@ -67,13 +70,16 @@ class LlmClient {
    *
    * <p>{@code previousError} 为上一次尝试未通过校验的失败原因（首次调用为 {@code null}）。重试时把失败原因
    * 回灌提示词：同一个提示词重试大概率仍产出同样的幻觉，只有把「上次错在哪」告诉模型，重试才有意义。
+   *
+   * <p>{@code taskId} 只用于把这次调用的 token 用量记到对应视频名下。
    */
-  TaskResult summarize(List<TranscriptSegment> transcript, int maxInputChars, String previousError)
+  TaskResult summarize(
+      String taskId, List<TranscriptSegment> transcript, int maxInputChars, String previousError)
       throws Exception {
     List<List<TranscriptSegment>> chunks = partitionTranscript(transcript, maxInputChars);
     List<TaskResult> partialResults = new ArrayList<>();
     for (List<TranscriptSegment> chunk : chunks)
-      partialResults.add(summarizeChunk(chunk, previousError));
+      partialResults.add(summarizeChunk(taskId, chunk, previousError));
     // chapters 由各块结果确定性合并排序，不交给模型重写：模型重写可能改动 sourceSegmentId 或时间，
     // 破坏服务端的时间轴与引文校验。只有 summary / keyPoints 这类纯文本才适合二次合并。
     List<Chapter> chapters =
@@ -85,7 +91,7 @@ class LlmClient {
     String summary;
     List<String> rawKeyPoints;
     if (chunks.size() > 1) {
-      MergedResult merged = mergeChunks(partialResults, previousError);
+      MergedResult merged = mergeChunks(taskId, partialResults, previousError);
       summary = merged.summary();
       rawKeyPoints = merged.keyPoints();
     } else {
@@ -105,8 +111,8 @@ class LlmClient {
    * 合并各块的 summary 与 keyPoints：要求模型输出合并去重后的 {@code {summary,keyPoints[]}}，只做纯文本整合。
    * 提示词只要求这两个字段，模型不接触章节引用与时间。
    */
-  private MergedResult mergeChunks(List<TaskResult> partialResults, String previousError)
-      throws Exception {
+  private MergedResult mergeChunks(
+      String taskId, List<TaskResult> partialResults, String previousError) throws Exception {
     StringBuilder source = new StringBuilder();
     for (int index = 0; index < partialResults.size(); index++) {
       TaskResult partial = partialResults.get(index);
@@ -130,7 +136,12 @@ class LlmClient {
                 "input", source.toString()));
     JsonNode merged =
         requestJson(
-            "summarize", PromptLibrary.MERGE, prompt, LlmJsonSchema.MERGE, Duration.ofSeconds(90));
+            taskId,
+            "summarize",
+            PromptLibrary.MERGE,
+            prompt,
+            LlmJsonSchema.MERGE,
+            Duration.ofSeconds(90));
     List<String> keyPoints = new ArrayList<>();
     for (JsonNode point : merged.path("keyPoints")) keyPoints.add(point.asText());
     return new MergedResult(merged.path("summary").asText(), keyPoints);
@@ -170,8 +181,8 @@ class LlmClient {
     return chunks;
   }
 
-  private TaskResult summarizeChunk(List<TranscriptSegment> transcript, String previousError)
-      throws Exception {
+  private TaskResult summarizeChunk(
+      String taskId, List<TranscriptSegment> transcript, String previousError) throws Exception {
     String source =
         transcript.stream().map(LlmClient::sourceLine).collect(Collectors.joining("\n"));
     String prompt =
@@ -185,6 +196,7 @@ class LlmClient {
                 source));
     JsonNode content =
         requestJson(
+            taskId,
             "summarize",
             PromptLibrary.SUMMARIZE,
             prompt,
@@ -211,7 +223,8 @@ class LlmClient {
         : "上次输出未通过校验：" + previousError + "，请修正后重新返回完整 JSON。\n";
   }
 
-  List<TranscriptSegment> translateToChinese(List<TranscriptSegment> transcript) throws Exception {
+  List<TranscriptSegment> translateToChinese(String taskId, List<TranscriptSegment> transcript)
+      throws Exception {
     Map<Long, String> translations = new HashMap<>();
     // Translation output is much longer than the input. Small batches prevent the model
     // from silently omitting trailing segments when a whole transcript is sent at once.
@@ -225,6 +238,7 @@ class LlmClient {
               Map.of("schema", LlmJsonSchema.TRANSLATE.json(), "input", source));
       JsonNode result =
           requestJson(
+              taskId,
               "translate",
               PromptLibrary.TRANSLATE,
               prompt,
@@ -252,6 +266,7 @@ class LlmClient {
    * <p>降级链是「主模型 → 备用模型」的一次性升级：flash 超时、报错或输出结构不可用时升级到 pro， 并打点、记 WARN 日志，便于确认降级路径真的被走到。
    */
   private JsonNode requestJson(
+      String taskId,
       String operation,
       PromptLibrary.Prompt prompt,
       String userPrompt,
@@ -263,7 +278,7 @@ class LlmClient {
     for (int index = 0; index < models.size(); index++) {
       String current = models.get(index);
       try {
-        return callOnce(current, operation, prompt, userPrompt, schema, timeout);
+        return callOnce(taskId, current, operation, prompt, userPrompt, schema, timeout);
       } catch (Exception ex) {
         failure = ex;
         if (index + 1 < models.size()) {
@@ -283,6 +298,7 @@ class LlmClient {
   }
 
   private JsonNode callOnce(
+      String taskId,
       String currentModel,
       String operation,
       PromptLibrary.Prompt prompt,
@@ -311,7 +327,7 @@ class LlmClient {
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
             .build();
-    JsonNode response = send(request, "内容服务", operation, currentModel);
+    JsonNode response = send(request, "内容服务", taskId, operation, prompt.id(), currentModel);
     String content = response.path("choices").path(0).path("message").path("content").asText();
     StructuredOutput parsed = parseStructured(json, content, schema);
     if (!parsed.ok()) throw outputFailure(operation, parsed.reason(), parsed.message());
@@ -376,7 +392,13 @@ class LlmClient {
     return compact.length() <= 200 ? compact : compact.substring(0, 200);
   }
 
-  private JsonNode send(HttpRequest request, String service, String operation, String currentModel)
+  private JsonNode send(
+      HttpRequest request,
+      String service,
+      String taskId,
+      String operation,
+      String promptId,
+      String currentModel)
       throws Exception {
     boolean success = false;
     try {
@@ -386,7 +408,7 @@ class LlmClient {
             response.statusCode(),
             service + "返回 HTTP " + response.statusCode() + "：" + shortBody(response.body()));
       JsonNode body = json.readTree(response.body());
-      recordUsage(currentModel, body);
+      recordUsage(taskId, operation, promptId, currentModel, body);
       success = true;
       return body;
     } finally {
@@ -394,14 +416,21 @@ class LlmClient {
     }
   }
 
-  /** 从响应 usage 字段累计 prompt / completion token 用量，按实际服务的模型归属。 */
-  private void recordUsage(String currentModel, JsonNode response) {
+  /**
+   * 从响应 usage 字段累计 token 指标（按实际服务的模型归属）并落库，供按提示词版本与模型核算成本。
+   *
+   * <p>记账发生在结构校验之前：只要能拿到响应体，token 就已经真实消耗，结构非法只影响这次输出能不能用。
+   */
+  private void recordUsage(
+      String taskId, String operation, String promptId, String currentModel, JsonNode response) {
     JsonNode usage = response.path("usage");
     if (!usage.isObject()) return;
-    metrics.recordLlmTokens(
-        currentModel,
-        usage.path("prompt_tokens").asLong(),
-        usage.path("completion_tokens").asLong());
+    long promptTokens = usage.path("prompt_tokens").asLong();
+    long completionTokens = usage.path("completion_tokens").asLong();
+    metrics.recordLlmTokens(currentModel, promptTokens, completionTokens);
+    usageLog.record(
+        new LlmUsageRepository.LlmCall(
+            taskId, operation, promptId, currentModel, promptTokens, completionTokens));
   }
 
   /** LLM 服务返回非 2xx；{@code status} 用于降级原因分类。 */

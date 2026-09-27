@@ -13,15 +13,17 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 /**
- * 用本地 HTTP 替身验证 LlmClient 会解析响应 {@code usage} 并打点，避免依赖真实云端模型。
+ * 用本地 HTTP 替身验证 LlmClient 会解析响应 {@code usage} 并打点、按提示词版本与模型落库，避免依赖真实云端模型。
  *
- * <p>覆盖成功（记录 prompt/completion token 与成功计数）与失败（HTTP 非 2xx 记失败）两条路径。
+ * <p>覆盖成功（记录 prompt/completion token、成功计数与账目）与失败（HTTP 非 2xx 记失败）两条路径。
  */
 class LlmClientMetricsTest {
   private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
   private final ObjectMapper json = new ObjectMapper();
+  private final LlmUsageRepository usageLog = Mockito.mock(LlmUsageRepository.class);
   private HttpServer server;
 
   @AfterEach
@@ -33,7 +35,7 @@ class LlmClientMetricsTest {
   void recordsTokensAndSuccessFromUsageField() throws Exception {
     LlmClient client = clientFor(200, successResponse(123, 45));
 
-    client.summarize(List.of(new TranscriptSegment(1, 0, 1000, "你好", null)), 60000, null);
+    client.summarize("task-1", List.of(new TranscriptSegment(1, 0, 1000, "你好", null)), 60000, null);
 
     assertEquals(
         123,
@@ -56,6 +58,11 @@ class LlmClientMetricsTest {
             .tags("operation", "summarize", "outcome", "success")
             .counter()
             .count());
+    // 账目要能回答「哪个视频、哪版提示词、哪个模型、多少 token」，所以四项缺一不可。
+    Mockito.verify(usageLog)
+        .record(
+            new LlmUsageRepository.LlmCall(
+                "task-1", "summarize", "summarize.v1", "test-model", 123, 45));
   }
 
   @Test
@@ -65,7 +72,8 @@ class LlmClientMetricsTest {
     assertThrows(
         IllegalStateException.class,
         () ->
-            client.summarize(List.of(new TranscriptSegment(1, 0, 1000, "你好", null)), 60000, null));
+            client.summarize(
+                "task-1", List.of(new TranscriptSegment(1, 0, 1000, "你好", null)), 60000, null));
 
     assertEquals(
         1,
@@ -75,6 +83,7 @@ class LlmClientMetricsTest {
             .counter()
             .count());
     assertNull(registry.find(WorkbenchMetrics.LLM_TOKENS).tag("type", "prompt").counter());
+    Mockito.verifyNoInteractions(usageLog);
   }
 
   private LlmClient clientFor(int status, String responseBody) throws Exception {
@@ -92,6 +101,7 @@ class LlmClientMetricsTest {
     return new LlmClient(
         new ObjectMapper(),
         new WorkbenchMetrics(registry),
+        usageLog,
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         "test-model",

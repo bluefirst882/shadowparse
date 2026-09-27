@@ -17,6 +17,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 /**
  * 用本地 HTTP 替身验证 P1-6 的跨块二次合并与要点去重/不截断行为，不依赖真实云端模型。
@@ -51,7 +52,7 @@ class LlmClientSummaryTest {
             new TranscriptSegment(2, 2000, 3000, "二", null));
 
     TaskResult result =
-        client.summarize(transcript, limitForSingleSegment(transcript), "第 1 个章节引文不符");
+        client.summarize("task-1", transcript, limitForSingleSegment(transcript), "第 1 个章节引文不符");
 
     assertEquals(3, requestPrompts.size(), "应为 2 次分块调用 + 1 次合并调用");
     assertTrue(requestPrompts.getLast().contains("合并去重"), "最后一次调用应是合并提示词");
@@ -69,7 +70,7 @@ class LlmClientSummaryTest {
         clientReturning(chunkResponse("块摘要", List.of("要点A", "要点A。", " 要点A "), 1, 0, 1000));
     List<TranscriptSegment> transcript = List.of(new TranscriptSegment(1, 0, 1000, "一", null));
 
-    TaskResult result = client.summarize(transcript, 60000, null);
+    TaskResult result = client.summarize("task-1", transcript, 60000, null);
 
     assertEquals(1, requestPrompts.size(), "单块不应额外发起合并调用");
     assertFalse(requestPrompts.getFirst().contains("合并去重"));
@@ -110,6 +111,7 @@ class LlmClientSummaryTest {
     return new LlmClient(
         json,
         new WorkbenchMetrics(new SimpleMeterRegistry()),
+        Mockito.mock(LlmUsageRepository.class),
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         "test-model",

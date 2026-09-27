@@ -45,6 +45,7 @@ class TaskListPaginationTest {
 
   @MockitoBean private TaskService service;
   @MockitoBean private ExportService exports;
+  @MockitoBean private LlmCostService costs;
 
   @Test
   void returnsItemsAndNextCursorForFirstPage() throws Exception {

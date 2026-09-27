@@ -29,10 +29,12 @@ class TaskController {
 
   private final TaskService service;
   private final ExportService exports;
+  private final LlmCostService costs;
 
-  TaskController(TaskService service, ExportService exports) {
+  TaskController(TaskService service, ExportService exports, LlmCostService costs) {
     this.service = service;
     this.exports = exports;
+    this.costs = costs;
   }
 
   @GetMapping
@@ -66,6 +68,13 @@ class TaskController {
   @GetMapping("/{id}/details")
   TaskDetails details(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
     return service.details(id, user.id());
+  }
+
+  /** 导出单个视频的 LLM 用量与成本，按提示词版本与实际模型分行。 */
+  @GetMapping("/{id}/cost")
+  TaskCost cost(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
+    service.get(id, user.id());
+    return costs.costOf(id);
   }
 
   @PostMapping
