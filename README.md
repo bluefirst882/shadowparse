@@ -47,7 +47,7 @@
 ### 0. 前端按需加载
 
 仅注册工作台实际使用的 Element Plus 组件、指令及样式，避免全量 UI 库进入首屏包。
-当前生产构建产物为约 356 KB JavaScript 和 96 KB CSS（未压缩），用于降低本地工作台首次加载体积。
+当前生产构建产物为约 361 KB JavaScript 和 97 KB CSS（未压缩），用于降低本地工作台首次加载体积。
 
 ### 1. 异步任务编排与故障恢复
 
@@ -119,6 +119,18 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 - **前端行为**：令牌存 `localStorage`，401 时自动清除并回到登录页
 - **历史数据**：鉴权上线前的无主任务在迁移中回填给种子账号 `demo`，已有转写与摘要数据保留
 
+### 7. 列表游标分页
+
+任务列表按 `created_at desc, id desc` 稳定排序，用 `(created_at, id)` 元组做**键集比较**（keyset，不用 OFFSET），
+避免大列表下翻页随深度变慢，也避免翻页途中有新任务插入时出现重复或漏项：
+
+- `GET /api/tasks?cursor=<opaque>&limit=<n>`：`limit` 可选，默认 20、上限 100；`cursor` 省略表示第一页。
+- 响应体为 `{"items":[...],"nextCursor":"..."}`；`nextCursor` 为 `null` 表示没有更多数据，前端拿它请求下一页。
+- 游标对客户端不透明，内部是 `base64url(毫秒时间戳|任务 id)`；时间戳固定毫秒精度，与
+  `tasks.created_at timestamp(3)` 一致，避免读出的时间被截断后跳过同一时间戳内的任务。
+- `limit` 非数字、≤0 或 >100，以及 `cursor` 非法（base64 无法解析、缺少字段、时间戳不合法）都返回 `400`，
+  不会静默当成第一页；游标仍在 SQL 层叠加 `owner_id` 过滤，无法借此读到其他账号的任务。
+
 ---
 
 ## 项目结构
@@ -131,6 +143,8 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 │       │   ├── TaskController.java       # REST 接口（鉴权后按账号隔离）
 │       │   ├── TaskService.java          # 任务编排与外部进程托管
 │       │   ├── TaskRepository.java       # JDBC 数据访问（读写强制带 owner）
+│       │   ├── TaskCursor.java           # 列表游标编解码（不透明 keyset 游标）
+│       │   ├── TaskPage.java             # 任务列表分页响应
 │       │   ├── SecurityConfig.java       # Spring Security 过滤链与密码编码器
 │       │   ├── JwtService.java           # JWT 签发与校验
 │       │   ├── JwtAuthenticationFilter.java # 从请求中解析令牌并建立身份
@@ -156,19 +170,22 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 除 `/api/auth/**` 外，所有接口都需要 `Authorization: Bearer <token>`；
 未携带或令牌无效返回 `401`，访问他人任务返回 `403`。
 
-| 方法     | 路径                              | 说明                         |
-| -------- | --------------------------------- | ---------------------------- |
-| `POST`   | `/api/auth/register`              | 注册并返回令牌               |
-| `POST`   | `/api/auth/login`                 | 登录并返回令牌               |
-| `GET`    | `/api/tasks`                      | 当前账号的任务列表           |
-| `POST`   | `/api/tasks`                      | 导入视频（multipart）        |
-| `GET`    | `/api/tasks/{id}/details`         | 任务详情（含转写与摘要结果） |
-| `POST`   | `/api/tasks/{id}/cancel`          | 取消任务                     |
-| `POST`   | `/api/tasks/{id}/retry`           | 重试摘要或重新执行本地处理   |
-| `POST`   | `/api/tasks/{id}/retranscribe`    | 重新转写                     |
-| `GET`    | `/api/tasks/{id}/video`           | 视频流（支持 Range）         |
-| `GET`    | `/api/tasks/{id}/export/{format}` | 导出 md / json / srt         |
-| `DELETE` | `/api/tasks/{id}`                 | 删除任务、视频及提取的音频   |
+| 方法     | 路径                              | 说明                           |
+| -------- | --------------------------------- | ------------------------------ |
+| `POST`   | `/api/auth/register`              | 注册并返回令牌                 |
+| `POST`   | `/api/auth/login`                 | 登录并返回令牌                 |
+| `GET`    | `/api/tasks?cursor=&limit=`       | 当前账号的任务列表（游标分页） |
+| `POST`   | `/api/tasks`                      | 导入视频（multipart）          |
+| `GET`    | `/api/tasks/{id}/details`         | 任务详情（含转写与摘要结果）   |
+| `POST`   | `/api/tasks/{id}/cancel`          | 取消任务                       |
+| `POST`   | `/api/tasks/{id}/retry`           | 重试摘要或重新执行本地处理     |
+| `POST`   | `/api/tasks/{id}/retranscribe`    | 重新转写                       |
+| `GET`    | `/api/tasks/{id}/video`           | 视频流（支持 Range）           |
+| `GET`    | `/api/tasks/{id}/export/{format}` | 导出 md / json / srt           |
+| `DELETE` | `/api/tasks/{id}`                 | 删除任务、视频及提取的音频     |
+
+`GET /api/tasks` 支持 `cursor`（不透明游标，省略即第一页）与 `limit`（默认 20、上限 100），
+响应体为 `{"items":[...],"nextCursor":"..."}`，`nextCursor` 为 `null` 表示已到最后一页；详见上文「列表游标分页」。
 
 ---
 
@@ -298,19 +315,19 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 
 ## 配置项
 
-| 变量                                | 默认值      | 说明                                       |
-| ----------------------------------- | ----------- | ------------------------------------------ |
-| `WORKBENCH_STORAGE_DIR`             | `./storage` | 视频、音频与模型文件的本机存放目录         |
-| `WORKBENCH_MAX_UPLOAD_BYTES`        | 20GB        | 单个视频大小上限                           |
-| `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 180         | 外部进程超时时间；首次下载模型时应保留充足时间 |
-| `FFMPEG_PATH`                       | `ffmpeg`    | FFmpeg 可执行文件路径                      |
-| `WHISPER_MODEL`                     | `turbo`     | Whisper 模型规格                           |
-| `WHISPER_SERVICE_URL`               | `http://host.docker.internal:8090` | 宿主机 Whisper 服务地址 |
-| `WHISPER_MODEL_DIR`                 | `E:/model/whisper` | 宿主机模型缓存目录 |
-| `WORKBENCH_JWT_SECRET`              | 无（必填）  | JWT 签名密钥，至少 32 字符，需自行随机生成 |
-| `WORKBENCH_TOKEN_TTL_HOURS`         | 24          | 令牌有效期（小时）                         |
-| `LLM_API_KEY`                       | 空          | 云端 LLM 密钥，留空则跳过摘要阶段          |
-| `LLM_MAX_INPUT_CHARS`               | 60000       | 单次摘要请求的字符上限，按完整转写片段分批 |
+| 变量                                | 默认值                             | 说明                                           |
+| ----------------------------------- | ---------------------------------- | ---------------------------------------------- |
+| `WORKBENCH_STORAGE_DIR`             | `./storage`                        | 视频、音频与模型文件的本机存放目录             |
+| `WORKBENCH_MAX_UPLOAD_BYTES`        | 20GB                               | 单个视频大小上限                               |
+| `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 180                                | 外部进程超时时间；首次下载模型时应保留充足时间 |
+| `FFMPEG_PATH`                       | `ffmpeg`                           | FFmpeg 可执行文件路径                          |
+| `WHISPER_MODEL`                     | `turbo`                            | Whisper 模型规格                               |
+| `WHISPER_SERVICE_URL`               | `http://host.docker.internal:8090` | 宿主机 Whisper 服务地址                        |
+| `WHISPER_MODEL_DIR`                 | `E:/model/whisper`                 | 宿主机模型缓存目录                             |
+| `WORKBENCH_JWT_SECRET`              | 无（必填）                         | JWT 签名密钥，至少 32 字符，需自行随机生成     |
+| `WORKBENCH_TOKEN_TTL_HOURS`         | 24                                 | 令牌有效期（小时）                             |
+| `LLM_API_KEY`                       | 空                                 | 云端 LLM 密钥，留空则跳过摘要阶段              |
+| `LLM_MAX_INPUT_CHARS`               | 60000                              | 单次摘要请求的字符上限，按完整转写片段分批     |
 
 > 密钥仅由后端读取，不会写入日志、前端响应或导出文件。
 

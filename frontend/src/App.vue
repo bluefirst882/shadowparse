@@ -20,7 +20,9 @@ const tasks = ref<Task[]>([]),
   query = ref(''),
   transcriptQuery = ref(''),
   currentMs = ref(0),
-  videoError = ref(false)
+  videoError = ref(false),
+  nextCursor = ref<string | null>(null),
+  loadingMore = ref(false)
 const authed = ref(Boolean(token.get())),
   registerMode = ref(false),
   authBusy = ref(false),
@@ -48,9 +50,22 @@ const stageName: Record<string, string> = {
 async function refresh() {
   loading.value = true
   try {
-    tasks.value = await api.list()
+    const target = tasks.value.length
+    const page = await api.list()
+    const merged = [...page.items]
+    let cursor = page.nextCursor ?? null
+    let guard = 0
+    // 轮询刷新时按最新游标补齐到已加载条数，避免把「加载更多」翻出的页回退掉。
+    while (cursor && merged.length < target && guard < 50) {
+      const next = await api.list(cursor)
+      merged.push(...next.items)
+      cursor = next.nextCursor ?? null
+      guard++
+    }
+    tasks.value = merged
+    nextCursor.value = cursor
     if (selected.value) {
-      const current = tasks.value.find((task) => task.id === selected.value?.task.id)
+      const current = merged.find((task) => task.id === selected.value?.task.id)
       if (current) selected.value = await api.details(current.id)
     }
   } catch (error) {
@@ -61,6 +76,24 @@ async function refresh() {
     message.value = describe(error, '无法连接本地服务，请确认后端已启动。')
   } finally {
     loading.value = false
+  }
+}
+async function loadMore() {
+  const cursor = nextCursor.value
+  if (!cursor || loadingMore.value) return
+  loadingMore.value = true
+  try {
+    const page = await api.list(cursor)
+    tasks.value = [...tasks.value, ...page.items]
+    nextCursor.value = page.nextCursor ?? null
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      signOut('登录已过期，请重新登录。')
+      return
+    }
+    message.value = describe(error, '无法加载更多任务，请稍后重试。')
+  } finally {
+    loadingMore.value = false
   }
 }
 async function submitAuth() {
@@ -89,9 +122,12 @@ function describe(error: unknown, fallback: string) {
 }
 function authMessage(error: unknown) {
   if (!(error instanceof ApiError))
-    return error instanceof Error ? error.message : '无法连接本地服务，请确认后端已启动。'
+    return error instanceof Error
+      ? error.message
+      : '无法连接本地服务，请确认后端已启动。'
   if (error.status === 409) return '用户名已存在，请更换或直接登录。'
-  if (error.status === 400) return '用户名需为 3-32 位字母、数字或下划线，密码至少 8 位。'
+  if (error.status === 400)
+    return '用户名需为 3-32 位字母、数字或下划线，密码至少 8 位。'
   if (error.status === 401) return '用户名或密码错误。'
   return describe(error, error.message)
 }
@@ -99,6 +135,7 @@ function signOut(reason = '') {
   token.clear()
   authed.value = false
   tasks.value = []
+  nextCursor.value = null
   selected.value = undefined
   authError.value = reason
   stopPolling()
@@ -198,14 +235,15 @@ onUnmounted(stopPolling)
     ><el-header class="header"
       ><div class="brand"><span></span>瞬析 VideoLab</div>
       <div class="context">本地视频解析工作台</div>
-      <div class="account"
-        ><el-button v-if="authed" link :icon="SwitchButton" @click="signOut()"
+      <div class="account">
+        <el-button v-if="authed" link :icon="SwitchButton" @click="signOut()"
           >退出登录</el-button
         ><el-button
           circle
           :icon="dark ? Sunny : Moon"
           :aria-label="dark ? '切换为浅色模式' : '切换为暗色模式'"
-          @click="applyTheme(!dark)" /></div
+          @click="applyTheme(!dark)"
+        /></div
     ></el-header>
     <el-main class="main"
       ><template v-if="!authed"
@@ -260,7 +298,8 @@ onUnmounted(stopPolling)
           type="info"
           show-icon
           :closable="true"
-          @close="message = ''" />
+          @close="message = ''"
+        />
         <section class="metrics">
           <div>
             <b>{{ tasks.length }}</b
@@ -360,7 +399,16 @@ onUnmounted(stopPolling)
                   :icon="Delete"
                   aria-label="删除任务"
                   @click="removeTask(row)" /></template></el-table-column
-          ></el-table></section></template
+          ></el-table>
+          <div v-if="tasks.length" class="list-footer">
+            <el-button
+              v-if="nextCursor"
+              :loading="loadingMore"
+              @click="loadMore"
+              >加载更多</el-button
+            ><span v-else class="muted">没有更多了</span>
+          </div>
+        </section></template
       ><template v-else
         ><section class="detail-head">
           <div>

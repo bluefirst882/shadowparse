@@ -25,10 +25,36 @@ class TaskRepositoryTest {
 
   @Test
   void filtersTaskListByOwner() {
-    when(jdbc.query(any(String.class), any(RowMapper.class), eq("user-a"))).thenReturn(List.of());
+    when(jdbc.query(any(String.class), any(RowMapper.class), eq("user-a"), eq(21)))
+        .thenReturn(List.of());
 
-    assertTrue(repository.all("user-a").isEmpty());
-    verify(jdbc).query(contains("owner_id=?"), any(RowMapper.class), eq("user-a"));
+    assertTrue(repository.page("user-a", null, 21).isEmpty());
+    verify(jdbc).query(contains("owner_id=?"), any(RowMapper.class), eq("user-a"), eq(21));
+  }
+
+  @Test
+  void pagesByKeysetTupleWhenCursorIsPresent() {
+    TaskCursor cursor = new TaskCursor(Instant.ofEpochMilli(1_700_000_000_123L), "task-1");
+    when(jdbc.query(
+            any(String.class),
+            any(RowMapper.class),
+            eq("user-a"),
+            any(),
+            any(),
+            eq("task-1"),
+            eq(5)))
+        .thenReturn(List.of());
+
+    assertTrue(repository.page("user-a", cursor, 5).isEmpty());
+    verify(jdbc)
+        .query(
+            contains("created_at<? or (created_at=? and id<?)"),
+            any(RowMapper.class),
+            eq("user-a"),
+            any(),
+            any(),
+            eq("task-1"),
+            eq(5));
   }
 
   @Test

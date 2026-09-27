@@ -194,6 +194,14 @@ small {
 .tasks {
   width: 100%;
 }
+.list-footer {
+  display: flex;
+  justify-content: center;
+  padding: 14px;
+}
+.list-footer .muted {
+  font-size: 13px;
+}
 .file-link {
   font: inherit;
   font-weight: 700;

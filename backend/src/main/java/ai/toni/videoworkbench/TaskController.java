@@ -3,10 +3,10 @@ package ai.toni.videoworkbench;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.List;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -19,10 +19,14 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/tasks")
 class TaskController {
+  private static final int DEFAULT_LIMIT = 20;
+  private static final int MAX_LIMIT = 100;
+
   private final TaskService service;
   private final ExportService exports;
 
@@ -32,8 +36,26 @@ class TaskController {
   }
 
   @GetMapping
-  List<VideoTask> list(@AuthenticationPrincipal AuthenticatedUser user) {
-    return service.list(user.id());
+  TaskPage list(
+      @RequestParam(value = "cursor", required = false) String cursor,
+      @RequestParam(value = "limit", required = false) String limit,
+      @AuthenticationPrincipal AuthenticatedUser user) {
+    return service.list(
+        user.id(), cursor == null ? null : TaskCursor.decode(cursor), parseLimit(limit));
+  }
+
+  private static int parseLimit(String value) {
+    if (value == null) return DEFAULT_LIMIT;
+    int limit;
+    try {
+      limit = Integer.parseInt(value.trim());
+    } catch (NumberFormatException ex) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit 必须为整数");
+    }
+    if (limit <= 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit 必须大于 0");
+    if (limit > MAX_LIMIT)
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit 不能超过 " + MAX_LIMIT);
+    return limit;
   }
 
   @GetMapping("/{id}")

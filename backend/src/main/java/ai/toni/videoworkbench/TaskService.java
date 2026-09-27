@@ -85,8 +85,17 @@ class TaskService {
             1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queueCapacity));
   }
 
-  List<VideoTask> list(String ownerId) {
-    return tasks.all(ownerId);
+  TaskPage list(String ownerId, TaskCursor cursor, int limit) {
+    // 多取一条，只为判断是否还有下一页，不返回给客户端。
+    List<VideoTask> rows = tasks.page(ownerId, cursor, limit + 1);
+    boolean hasMore = rows.size() > limit;
+    List<VideoTask> items = List.copyOf(rows.subList(0, hasMore ? limit : rows.size()));
+    String nextCursor = hasMore ? cursorOf(items.get(items.size() - 1)) : null;
+    return new TaskPage(items, nextCursor);
+  }
+
+  private static String cursorOf(VideoTask task) {
+    return new TaskCursor(task.createdAt(), task.id()).encode();
   }
 
   VideoTask get(String id, String ownerId) {

@@ -33,9 +33,26 @@ class TaskRepository {
               r.getString("text"),
               r.getString("translation"));
 
-  List<VideoTask> all(String ownerId) {
+  /**
+   * 按 {@code (created_at desc, id desc)} 取一页任务。{@code cursor} 为空表示第一页；否则用 {@code (created_at, id)}
+   * 元组做键集比较，避免 OFFSET 在大列表上的性能与漂移问题。调用方多取 一条以判断是否还有下一页。
+   */
+  List<VideoTask> page(String ownerId, TaskCursor cursor, int limit) {
+    if (cursor == null)
+      return jdbc.query(
+          "select * from tasks where owner_id=? order by created_at desc,id desc limit ?",
+          mapper,
+          ownerId,
+          limit);
+    Timestamp at = Timestamp.from(cursor.createdAt());
     return jdbc.query(
-        "select * from tasks where owner_id=? order by created_at desc", mapper, ownerId);
+        "select * from tasks where owner_id=? and (created_at<? or (created_at=? and id<?)) order by created_at desc,id desc limit ?",
+        mapper,
+        ownerId,
+        at,
+        at,
+        cursor.id(),
+        limit);
   }
 
   List<VideoTask> recoverable() {

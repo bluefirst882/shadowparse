@@ -29,6 +29,8 @@ export type Details = {
   transcript: Segment[]
   result?: { summary: string; keyPoints: string[]; chapters: Chapter[] }
 }
+// 列表接口按游标分页：nextCursor 为 null 表示没有更多数据。
+export type TaskPage = { items: Task[]; nextCursor?: string | null }
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const headers = new Headers(init?.headers)
   const current = token.get()
@@ -79,7 +81,10 @@ const credentials = (username: string, password: string) => ({
   body: JSON.stringify({ username, password })
 })
 export const api = {
-  list: () => request<Task[]>('/tasks'),
+  list: (cursor?: string | null) =>
+    request<TaskPage>(
+      `/tasks${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`
+    ),
   details: (id: string) => request<Details>(`/tasks/${id}/details`),
   upload: (file: File) => {
     const data = new FormData()

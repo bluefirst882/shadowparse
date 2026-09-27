@@ -45,7 +45,7 @@ class TaskAuthorizationTest {
 
   @Test
   void servesOnlyOwnTasks() throws Exception {
-    when(service.list("user-a")).thenReturn(List.of());
+    when(service.list("user-a", null, 20)).thenReturn(new TaskPage(List.of(), null));
 
     mvc.perform(get("/api/tasks").header(HttpHeaders.AUTHORIZATION, bearer("user-a")))
         .andExpect(status().isOk());

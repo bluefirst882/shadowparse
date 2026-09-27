@@ -93,7 +93,7 @@ class ApiErrorResponseTest {
 
   @Test
   void preservesStatusCodeThatErrorCodeDoesNotCover() throws Exception {
-    when(service.list("user-a"))
+    when(service.list("user-a", null, 20))
         .thenThrow(new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "无法处理的请求"));
 
     MvcResult result =
@@ -111,7 +111,8 @@ class ApiErrorResponseTest {
   @Test
   void keepsSpringClientErrorsOutOfTheServerErrorBucket() throws Exception {
     // 路径不存在这类 Spring 自带错误属于客户端错误，兜底处理器不能把它们统一变成 500。
-    when(service.list("user-a")).thenThrow(new ErrorResponseException(HttpStatus.NOT_FOUND));
+    when(service.list("user-a", null, 20))
+        .thenThrow(new ErrorResponseException(HttpStatus.NOT_FOUND));
 
     MvcResult result =
         mvc.perform(get("/api/tasks").header(HttpHeaders.AUTHORIZATION, bearer("user-a")))
@@ -142,7 +143,8 @@ class ApiErrorResponseTest {
 
   @Test
   void returnsInternalServerErrorWithoutLeakingExceptionDetails() throws Exception {
-    when(service.list("user-a")).thenThrow(new IllegalStateException("secret internal detail"));
+    when(service.list("user-a", null, 20))
+        .thenThrow(new IllegalStateException("secret internal detail"));
 
     MvcResult result =
         mvc.perform(get("/api/tasks").header(HttpHeaders.AUTHORIZATION, bearer("user-a")))
@@ -159,7 +161,7 @@ class ApiErrorResponseTest {
 
   @Test
   void includesGeneratedTraceIdOnSuccessfulResponses() throws Exception {
-    when(service.list("user-a")).thenReturn(List.of());
+    when(service.list("user-a", null, 20)).thenReturn(new TaskPage(List.of(), null));
 
     MvcResult result =
         mvc.perform(get("/api/tasks").header(HttpHeaders.AUTHORIZATION, bearer("user-a")))
@@ -171,7 +173,7 @@ class ApiErrorResponseTest {
 
   @Test
   void reusesValidIncomingTraceIdHeader() throws Exception {
-    when(service.list("user-a")).thenReturn(List.of());
+    when(service.list("user-a", null, 20)).thenReturn(new TaskPage(List.of(), null));
 
     MvcResult result =
         mvc.perform(
