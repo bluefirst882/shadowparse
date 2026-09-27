@@ -14,7 +14,14 @@ await mkdir(outputDir, { recursive: true })
 
 const browser = await chromium.launch({ channel: 'chrome' })
 try {
-  const page = await browser.newPage({ viewport: { width: 1600, height: 660 } })
+  // Grafana 的面板区域是内部滚动容器，fullPage 截不到视口以下的内容；
+  // 面板变多后把视口调高（GRAFANA_VIEWPORT_HEIGHT）才能一次截全。
+  const page = await browser.newPage({
+    viewport: {
+      width: Number(process.env.GRAFANA_VIEWPORT_WIDTH ?? 1600),
+      height: Number(process.env.GRAFANA_VIEWPORT_HEIGHT ?? 660)
+    }
+  })
   await page.goto(`${baseUrl}/login`, { waitUntil: 'domcontentloaded' })
   await page.fill('input[name="user"]', user)
   await page.fill('input[name="password"]', password)

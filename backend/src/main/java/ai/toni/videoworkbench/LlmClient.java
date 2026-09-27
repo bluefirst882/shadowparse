@@ -45,24 +45,33 @@ class LlmClient {
   private final String reasoningEffort;
   private final WorkbenchMetrics metrics;
   private final LlmUsageRepository usageLog;
+  private final DownstreamResilience resilience;
+  private final Duration summarizeTimeout;
+  private final Duration translateTimeout;
 
   LlmClient(
       ObjectMapper json,
       WorkbenchMetrics metrics,
       LlmUsageRepository usageLog,
+      DownstreamResilience resilience,
       @Value("${workbench.llm.base-url}") String baseUrl,
       @Value("${workbench.llm.api-key}") String apiKey,
       @Value("${workbench.llm.model}") String model,
       @Value("${workbench.llm.fallback-model:}") String fallbackModel,
-      @Value("${workbench.llm.reasoning-effort}") String reasoningEffort) {
+      @Value("${workbench.llm.reasoning-effort}") String reasoningEffort,
+      @Value("${workbench.llm.timeout-seconds:90}") int summarizeTimeoutSeconds,
+      @Value("${workbench.llm.translate-timeout-seconds:180}") int translateTimeoutSeconds) {
     this.json = json;
     this.metrics = metrics;
     this.usageLog = usageLog;
+    this.resilience = resilience;
     this.baseUrl = baseUrl.replaceAll("/+$", "");
     this.apiKey = apiKey;
     this.model = model;
     this.fallbackModel = fallbackModel == null ? "" : fallbackModel.strip();
     this.reasoningEffort = reasoningEffort;
+    this.summarizeTimeout = Duration.ofSeconds(summarizeTimeoutSeconds);
+    this.translateTimeout = Duration.ofSeconds(translateTimeoutSeconds);
   }
 
   /**
@@ -135,13 +144,7 @@ class LlmClient {
                 "retryHint", retryHint(previousError),
                 "input", source.toString()));
     JsonNode merged =
-        requestJson(
-            taskId,
-            "summarize",
-            PromptLibrary.MERGE,
-            prompt,
-            LlmJsonSchema.MERGE,
-            Duration.ofSeconds(90));
+        requestJson(taskId, "summarize", PromptLibrary.MERGE, prompt, LlmJsonSchema.MERGE);
     List<String> keyPoints = new ArrayList<>();
     for (JsonNode point : merged.path("keyPoints")) keyPoints.add(point.asText());
     return new MergedResult(merged.path("summary").asText(), keyPoints);
@@ -195,13 +198,7 @@ class LlmClient {
                 "input",
                 source));
     JsonNode content =
-        requestJson(
-            taskId,
-            "summarize",
-            PromptLibrary.SUMMARIZE,
-            prompt,
-            LlmJsonSchema.SUMMARIZE,
-            Duration.ofSeconds(90));
+        requestJson(taskId, "summarize", PromptLibrary.SUMMARIZE, prompt, LlmJsonSchema.SUMMARIZE);
     return json.treeToValue(content, TaskResult.class);
   }
 
@@ -238,12 +235,7 @@ class LlmClient {
               Map.of("schema", LlmJsonSchema.TRANSLATE.json(), "input", source));
       JsonNode result =
           requestJson(
-              taskId,
-              "translate",
-              PromptLibrary.TRANSLATE,
-              prompt,
-              LlmJsonSchema.TRANSLATE,
-              Duration.ofSeconds(180));
+              taskId, "translate", PromptLibrary.TRANSLATE, prompt, LlmJsonSchema.TRANSLATE);
       for (JsonNode item : result.path("translations"))
         translations.put(item.path("id").asLong(), item.path("translation").asText().trim());
       if (chunk.stream()
@@ -261,11 +253,38 @@ class LlmClient {
   }
 
   /**
-   * 发起一次结构化请求：约束返回体为 JSON 对象，解析后按 schema 机械校验；任一步失败即沿模型降级链换模型重试。
+   * 发起一次结构化请求：先过容错外壳（并发隔板 + 熔断器），再走模型降级链。
    *
-   * <p>降级链是「主模型 → 备用模型」的一次性升级：flash 超时、报错或输出结构不可用时升级到 pro， 并打点、记 WARN 日志，便于确认降级路径真的被走到。
+   * <p>熔断打开或隔板已满时请求根本没发出去，归为瞬时故障交给队列退避重试；这类拒绝**不走**降级链， 因为备用模型同样会被同一个熔断器挡住，重试只是把 3 次失败拖成 6
+   * 次。超时取本操作配置的 {@code timeout} （见 {@code workbench.llm.timeout-seconds} / {@code
+   * translate-timeout-seconds}），由 HTTP 客户端强制。
+   *
+   * <p>降级链的判定在 {@link #requestJsonUnprotected}：主模型超时、报错或输出结构不可用时升级到备用模型， 并打点、记 WARN
+   * 日志，便于确认降级路径真的被走到。
    */
   private JsonNode requestJson(
+      String taskId,
+      String operation,
+      PromptLibrary.Prompt prompt,
+      String userPrompt,
+      LlmJsonSchema.Schema schema)
+      throws Exception {
+    Duration timeout = PromptLibrary.TRANSLATE == prompt ? translateTimeout : summarizeTimeout;
+    try {
+      return resilience.call(
+          DownstreamResilience.Target.LLM,
+          () -> requestJsonUnprotected(taskId, operation, prompt, userPrompt, schema, timeout));
+    } catch (Exception ex) {
+      if (DownstreamResilience.isRejected(ex))
+        throw new TransientFailure(
+            TransientFailure.LLM_UNAVAILABLE,
+            "内容服务熔断器已打开或并发已满（" + ex.getClass().getSimpleName() + "），本次未发起请求，稍后自动重试",
+            ex);
+      throw ex;
+    }
+  }
+
+  private JsonNode requestJsonUnprotected(
       String taskId,
       String operation,
       PromptLibrary.Prompt prompt,

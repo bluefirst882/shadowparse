@@ -16,6 +16,9 @@ class TransientFailure extends RuntimeException {
   /** 数据库不可达或连接中断。 */
   static final String DATABASE_UNAVAILABLE = "database_unavailable";
 
+  /** LLM 调用被熔断器或并发隔板拒绝（请求没发出去）。 */
+  static final String LLM_UNAVAILABLE = "llm_unavailable";
+
   private final String reason;
 
   TransientFailure(String reason, String message) {

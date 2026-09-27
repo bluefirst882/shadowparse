@@ -224,7 +224,8 @@ class TaskServiceTest {
         1024,
         1,
         60000,
-        queue);
+        queue,
+        DownstreamResilience.withDefaults());
   }
 
   private VideoTask task(TaskStatus status) {

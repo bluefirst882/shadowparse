@@ -26,11 +26,45 @@ spring:
         max-concurrency: 1
 server.error.include-message: never
 management:
-  endpoints.web.exposure.include: health,prometheus
+  endpoints.web.exposure.include: health,prometheus,circuitbreakers,circuitbreakerevents
   endpoint.health.show-details: never
   metrics:
     tags:
       application: video-workbench
+# 下游容错：并发隔板（本地快速拒绝）+ 熔断器（下游持续失败时不再真的发请求）。
+# 重试与超时不在这里配：重试归模型降级链与队列退避，超时归 HTTP 客户端的每请求 timeout，理由见 DownstreamResilience。
+resilience4j:
+  circuitbreaker:
+    instances:
+      llm:
+        sliding-window-type: COUNT_BASED
+        # 窗口与阈值按「一次请求」计数（不是按单个模型算）：一次 requestJson 里主模型失败还会再试备用模型，
+        # 只有整次请求都失败才记为一次失败。长视频一次尝试会切多个分块，同一次内容生成就能打出多次请求。
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # 不注册健康指示器：熔断打开是下游暂时不可用，不该让本进程的 /actuator/health 变成 DOWN 而被重启。
+        register-health-indicator: false
+      whisper:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 6
+        minimum-number-of-calls: 3
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 2
+        automatic-transition-from-open-to-half-open-enabled: true
+        register-health-indicator: false
+  bulkhead:
+    instances:
+      llm:
+        max-concurrent-calls: ${WORKBENCH_LLM_MAX_CONCURRENT:4}
+        max-wait-duration: 0
+      whisper:
+        max-concurrent-calls: ${WORKBENCH_WHISPER_MAX_CONCURRENT:1}
+        max-wait-duration: 0
 logging:
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] %logger{36} - %msg%n"
@@ -58,6 +92,10 @@ workbench:
     fallback-model: ${LLM_FALLBACK_MODEL:deepseek-v4-pro}
     reasoning-effort: ${LLM_REASONING_EFFORT:low}
     max-input-chars: ${LLM_MAX_INPUT_CHARS:60000}
+    # 单次请求的硬超时，由 HTTP 客户端强制（不是 Resilience4j TimeLimiter，理由见 DownstreamResilience）：
+    # 摘要/合并与翻译的输出长度差一个数量级，所以分开配置。
+    timeout-seconds: ${WORKBENCH_LLM_TIMEOUT_SECONDS:90}
+    translate-timeout-seconds: ${WORKBENCH_LLM_TRANSLATE_TIMEOUT_SECONDS:180}
     # 模型单价（每百万 token），只用于把已入库的 usage 折算成金额：
     # 格式「模型:输入单价:输出单价」，多条用逗号分隔，不配置则只统计 token 不折算金额。
     prices: ${LLM_PRICES:}

@@ -38,6 +38,7 @@
 | 数据库      | MySQL 8 + Flyway 版本迁移                            |
 | 消息队列    | RabbitMQ 4（持久化队列 + 手动 ack，幂等由数据库条件更新保证） |
 | AI / 音视频 | Whisper（turbo）、FFmpeg、LLM API（结构化输出）      |
+| 容错        | Resilience4j 2.3（并发隔板 + 熔断器，熔断状态可从 Actuator/Prometheus 观测） |
 | 前端        | Vue 3、TypeScript、Vite、Element Plus                |
 | 工程化      | JUnit、Spotless + google-java-format、Docker Compose |
 
@@ -208,6 +209,43 @@ from llm_calls group by prompt_id, model order by prompt_id, model;
 
 ---
 
+### 9. 下游调用的容错治理
+
+LLM 与 Whisper 都是「会挂、会慢、会被限流」的外部依赖，靠调用方自己控节奏：
+
+- **并发隔板 + 熔断器**（Resilience4j）：`DownstreamResilience` 统一封装，顺序是
+  **隔板（外）→ 熔断器（内）→ 真实调用**。隔板在最外层，被隔板拒绝的调用不会记进熔断器的失败率——
+  否则「本地并发满」会被误判成「下游故障」，把熔断器白白推向打开。
+  隔板 `max-wait-duration: 0` 即**不排队、直接拒绝**，这就是「下游挂掉时快速失败而不是堆积线程」的实现方式。
+- **超时由 HTTP 客户端强制**：`workbench.llm.timeout-seconds`（默认 90s）/`translate-timeout-seconds`（默认 180s）
+  作用于 JDK `HttpRequest.timeout`；Whisper 用 `WORKBENCH_PROCESS_TIMEOUT_MINUTES`。
+- **刻意不叠 Resilience4j 的 Retry 与 TimeLimiter**：重试已经有三处明确归属（模型降级链 flash→pro、
+  任务内 3 次重新生成、队列指数退避），再套一层会叠加放大；TimeLimiter 只能让调用方提前返回、
+  藏不住仍在跑的请求，交给 HTTP 客户端强制更诚实。理由写在 `DownstreamResilience` 的注释里。
+- **不注册熔断器健康指示器**：熔断打开说明下游不健康，不代表本进程该被重启；
+  算进 `/actuator/health` 会让容器健康检查失败、被编排反复重建，反而扩大故障面。
+- **拒绝即瞬时故障**：被熔断器或隔板拒绝的调用在 `LlmClient` 里转成
+  `TransientFailure("llm_unavailable")`（Whisper 侧为 `whisper_unavailable`），
+  任务回到 `QUEUED` 走 P2-2 的指数退避——容错和重试是接上的，不是两套互不相干的机制。
+
+```text
+# 实测：注入不可达的 LLM 地址后的日志与熔断状态（连接被拒，未发出请求）
+WARN  LlmClient     - 模型 deepseek-v4-flash 调用失败（io_error）：；降级到 deepseek-v4-pro   ← 前 5 次真的发出去了
+WARN  TaskService   - 任务处理遇到瞬时故障，等待退避重试：taskId=6493bbed-… reason=llm_unavailable
+WARN  TaskQueueConsumer - 任务处理遇到瞬时故障，5000 ms 后进行第 2 次尝试：reason=llm_unavailable
+                        detail=内容服务熔断器已打开或并发已满（CallNotPermittedException），本次未发起请求
+ERROR TaskQueueConsumer - 任务已达重试上限 4 次，转入死信队列：reason=llm_unavailable
+
+{"circuitBreakers":{"llm":{"failureRate":"100.0%","bufferedCalls":5,"failedCalls":5,
+  "notPermittedCalls":3,"state":"OPEN"}, …}}
+```
+
+Whisper 侧的时间证据更直观：真实失败要等满 **10s** 连接超时，熔断之后第 4 次尝试距离上一条日志只有 **0.1s**
+（这点时间只够 ffmpeg 抽音频），请求根本没发出去。完整数据与两种结局的差异见
+[docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
+---
+
 ## 项目结构
 
 ```
@@ -307,12 +345,14 @@ from llm_calls group by prompt_id, model order by prompt_id, model;
 
 ### 端点
 
-| 端点                       | 说明                                                          |
-| -------------------------- | ------------------------------------------------------------- |
-| `GET /actuator/health`     | 存活探针，容器 healthcheck 使用；`{"status":"UP"}`            |
-| `GET /actuator/prometheus` | Prometheus 文本格式指标（JVM/HTTP 默认指标 + 下列自定义指标） |
+| 端点                                  | 说明                                                          |
+| ------------------------------------- | ------------------------------------------------------------- |
+| `GET /actuator/health`                | 存活探针，容器 healthcheck 使用；`{"status":"UP"}`            |
+| `GET /actuator/prometheus`            | Prometheus 文本格式指标（JVM/HTTP 默认指标 + 下列自定义指标） |
+| `GET /actuator/circuitbreakers`       | 各熔断器的实时状态与计数（`state` / `failureRate` / `notPermittedCalls`） |
+| `GET /actuator/circuitbreakerevents`  | 熔断器状态变迁事件流（何时打开、何时半开、何时恢复）          |
 
-两个端点都在 `SecurityConfig` 中放行，**无需令牌**（取舍见本节末尾）。
+四个端点都在 `SecurityConfig` 中放行，**无需令牌**（取舍见本节末尾）。
 
 ### 自定义指标
 
@@ -330,9 +370,26 @@ from llm_calls group by prompt_id, model order by prompt_id, model;
 | 队列深度     | `workbench.queue.depth`            | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge），读自 broker 的真实积压量；broker 不可达时为 `-1` | 无                                         | `RabbitTaskQueue` 构造函数绑定     |
 | 队列等待时长 | `workbench.queue.wait`             | `workbench_queue_wait_seconds`             | 任务从入队到真正开始执行的等待时长直方图（取消息 `timestamp`）  | 无                                         | `TaskQueueConsumer.handle`         |
 | 投递失败次数 | `workbench.queue.publish_failures` | `workbench_queue_publish_failures_total`   | broker 确认（publisher confirm）未成功返回的次数                | 无                                         | `RabbitTaskQueue.publish`          |
-| 退避重试次数 | `workbench.queue.retries`          | `workbench_queue_retries_total`            | 瞬时故障后安排退避重试的次数                                    | `reason=whisper_unavailable/database_unavailable`、`attempt`（即将进行的第几次尝试） | `TaskQueueConsumer.retryLater`     |
+| 退避重试次数 | `workbench.queue.retries`          | `workbench_queue_retries_total`            | 瞬时故障后安排退避重试的次数                                    | `reason=whisper_unavailable/database_unavailable/llm_unavailable`、`attempt`（即将进行的第几次尝试） | `TaskQueueConsumer.retryLater`     |
 | 死信任务数   | `workbench.queue.dead_letters`     | `workbench_queue_dead_letters_total`       | 超过重试上限、转入死信队列留档的任务数（需要人工处理）           | `reason`                                   | `TaskQueueConsumer.deadLetter`     |
 
+下表的指标由 `resilience4j-micrometer` 自动导出，名字不是本项目起的，但它是判断「下游到底挂没挂」最直接的入口：
+
+| Micrometer 名                                    | Prometheus 名                                    | 含义                                                              | 标签                       |
+| ------------------------------------------------ | ------------------------------------------------ | ----------------------------------------------------------------- | -------------------------- |
+| `resilience4j.circuitbreaker.state`              | `resilience4j_circuitbreaker_state`              | 熔断器状态，`closed/open/half_open/disabled/forced_open/metrics_only` 各一条 Gauge，值 `1` 表示当前处于该状态 | `name=llm/whisper`、`state` |
+| `resilience4j.circuitbreaker.calls`              | `resilience4j_circuitbreaker_calls_seconds`      | 放行调用的耗时与结果（Summary，`_count` 即次数）                  | `name`、`kind=successful/failed/not_permitted/ignored` |
+| `resilience4j.circuitbreaker.failure.rate`       | `resilience4j_circuitbreaker_failure_rate`       | 当前窗口内的失败率；`-1` 表示样本数还没到 `minimum-number-of-calls`，暂不判定 | `name`                     |
+| `resilience4j.circuitbreaker.not.permitted.calls`| `resilience4j_circuitbreaker_not_permitted_calls_total` | 被熔断器挡下、**没有发出请求**的调用数                     | `name`、`kind=not_permitted` |
+| `resilience4j.bulkhead.available.concurrent.calls`| `resilience4j_bulkhead_available_concurrent_calls` | 并发隔板剩余名额，降到 `0` 表示该下游并发已满、新调用会被本地拒绝 | `name`                     |
+| `resilience4j.bulkhead.max.allowed.concurrent.calls`| `resilience4j_bulkhead_max_allowed_concurrent_calls` | 并发隔板容量                                                   | `name`                     |
+
+- **熔断计数口径**：熔断器按**一次业务请求**（`requestJson`）计数，而一次 `requestJson` 内部主模型失败后还会再试备用模型，
+  所以 `workbench_llm_requests_total{outcome="failure"}` 通常是 `resilience4j_circuitbreaker_calls_seconds_count{kind="failed"}`
+  的 **2 倍**，两个数字不能混着读。判断「有没有真的打过去」要看 `not_permitted_calls_total` 是否增长、
+  而 `workbench_llm_requests_total` 是否**停住**。
+- **隔板饱和没有计数器**：Resilience4j 只导出剩余名额，不导出 rejected 计数，饱和只能靠
+  `available_concurrent_calls` 归零来判断（已如实写进 README 限制）。
 - **usage 解析**：`LlmClient` 原实现只取 `choices[0].message.content`，**并不解析 `usage`**；先前补上 `usage.prompt_tokens` / `usage.completion_tokens` 的读取并累加到指标，现在同一处还会按「任务 + 提示词版本 + 实际模型」写进 `llm_calls` 表，用于单视频成本导出。
 - **队列深度来自 broker**：`WorkbenchMetrics.bindQueueDepth(Supplier<Number>)` 由 `RabbitTaskQueue` 注入数据源，用 `AmqpAdmin.getQueueProperties` 被动读取队列积压量。读不到时返回 `-1`（并在状态翻转时打一条 WARN），而不是回落成 `0`——把「broker 不可达」伪装成「队列为空」会让人误判系统健康。
 - **投递失败只打点与记日志**：`publish` 抛异常时任务保持 `QUEUED` 并把错误提示交回调用方（导入接口返回 503，任务仍在），异步拒收（broker 收下了但未确认）只计 `workbench.queue.publish_failures` 并记 ERROR 日志，**不自动重投**，依赖服务启动时的恢复重投兜底（这个取舍在 README 限制里如实标明）。
@@ -346,7 +403,7 @@ docker compose up -d --wait      # backend / frontend / mysql / prometheus / gra
 - Prometheus：<http://localhost:9090>，抓取任务 `video-workbench-backend`，目标 `backend:8080/actuator/prometheus`（容器网络内，无需令牌）。
 - Grafana：<http://localhost:3000>，默认账号 `admin` / `workbench`（可用 `GRAFANA_ADMIN_USER`、`GRAFANA_ADMIN_PASSWORD` 覆盖）。数据源与面板均由 `ops/grafana/provisioning` 自动配置，面板 UID 为 `workbench-observability`。
 
-面板覆盖上述主要指标：LLM 调用成功/失败/重试计数、转写完成次数与平均耗时、当前队列深度，以及 token 用量、LLM 调用次数、转写耗时 P50/P95、队列等待时长四条曲线（较晚加入的「校验拦截」「模型降级」「输出结构失败」三个计数器尚未画进面板，可在 Prometheus 直接查询）。
+面板覆盖上述主要指标：LLM 调用成功/失败/重试计数、转写完成次数与平均耗时、当前队列深度，以及 token 用量、LLM 调用次数、转写耗时 P50/P95、队列等待时长四条曲线，另有五个容错面板——熔断器打开、熔断器本地拒绝次数、并发隔板剩余名额、下游调用结果（按名称与结果）、下游失败率（带 50% 阈值线）。（较晚加入的「校验拦截」「模型降级」「输出结构失败」三个计数器尚未画进面板，可在 Prometheus 直接查询。）
 
 ![可观测性面板](docs/可观测性面板.png)
 
@@ -354,13 +411,21 @@ docker compose up -d --wait      # backend / frontend / mysql / prometheus / gra
 
 ![故障注入下的 LLM 失败/重试指标](docs/可观测性面板-故障注入.png)
 
-复现截图：`npm run screenshot:grafana`（默认写入 `docs/可观测性面板.png`，可传文件名参数）。
+下图是**熔断器打开时**的同一块面板（把容器 `LLM_BASE_URL` 指向连接立即被拒的地址后重试任务）：
+从上往下第三行起是新增的容错面板，「熔断器打开」里 `llm` 为 `1`（红）、`whisper` 为 `0`（绿），
+本地拒绝 `llm` 累计 6 次，隔板剩余名额 `llm 4 / whisper 1`，右下角失败率曲线打到 100% 并压在 50% 阈值线上：
+
+![熔断器打开时的可观测性面板](docs/可观测性面板-熔断.png)
+
+复现截图：`npm run screenshot:grafana`（默认写入 `docs/可观测性面板.png`，可传文件名参数；
+面板变多后截图需要更高的视口，可用 `GRAFANA_VIEWPORT_HEIGHT=1500` 覆盖默认的 660）。
 
 ### 鉴权取舍（如实说明）
 
-`/actuator/health` 与 `/actuator/prometheus` 当前**未做鉴权**，任何能访问后端端口的人都能读取指标。
-这是为了让 compose 网络内的 Prometheus 直接抓取而做的取舍：指标不包含视频内容或密钥，
-但包含调用量、耗时、token 用量与队列状态等运营信息。**真实部署应把这两个端点限制在内网**，
+`/actuator/health`、`/actuator/prometheus`、`/actuator/circuitbreakers` 与 `/actuator/circuitbreakerevents`
+当前**未做鉴权**，任何能访问后端端口的人都能读取指标与熔断状态。
+这是为了让 compose 网络内的 Prometheus 直接抓取而做的取舍：这些数据不包含视频内容或密钥，
+但包含调用量、耗时、token 用量与队列状态等运营信息。**真实部署应把这些端点限制在内网**，
 或用反向代理 / 抓取侧鉴权（如只允许 Prometheus 网段访问、加 Basic Auth），不要直接暴露到公网。
 
 ---
@@ -499,6 +564,10 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | `LLM_MAX_INPUT_CHARS`               | 60000                              | 单次摘要请求的字符上限，按完整转写片段分批         |
 | `LLM_PRICES`                        | 空                                 | 模型单价，格式 `模型:每百万输入token单价:每百万输出token单价`（逗号分隔多条）。留空则只统计 token，成本导出为 `null`；仓库不内置任何价格 |
 | `LLM_PRICE_CURRENCY`                | `USD`                              | 成本导出里的货币标记，随你填入单价的币种调整       |
+| `WORKBENCH_LLM_TIMEOUT_SECONDS`     | 90                                 | 摘要/合并单次 LLM 请求的超时（秒），由 `HttpRequest.timeout` 强制 |
+| `WORKBENCH_LLM_TRANSLATE_TIMEOUT_SECONDS` | 180                          | 翻译单次 LLM 请求的超时（秒）；翻译输出比输入长，给更宽的上限 |
+| `WORKBENCH_LLM_MAX_CONCURRENT`      | 4                                  | LLM 并发隔板容量，超出直接拒绝（不排队）；置 0 会让所有 LLM 调用立即被拒 |
+| `WORKBENCH_WHISPER_MAX_CONCURRENT`  | 1                                  | Whisper 并发隔板容量，默认串行；本机 GPU 同时跑多个转写只会互相拖慢 |
 | `PROMETHEUS_HOST_PORT`              | 9090                               | Prometheus 映射到宿主机的端口                      |
 | `GRAFANA_HOST_PORT`                 | 3000                               | Grafana 映射到宿主机的端口                         |
 | `GRAFANA_ADMIN_USER`                | `admin`                            | Grafana 管理员账号                                 |
@@ -565,6 +634,22 @@ Prometheus 目标 `video-workbench-backend` 为 `up`，Grafana 面板与数据�
 恢复 `WHISPER_SERVICE_URL` 后对同一任务 `POST /api/tasks/{id}/retry`（人工重投）即跑通，最终 `COMPLETED/COMPLETED`（100%），
 而死信队列里那条留档消息仍在（重投走的是业务接口，不是消费死信消息）。后端 `mvnw verify` 通过：
 `Tests run: 120, Failures: 0, Errors: 0, Skipped: 3`，Spotless 通过。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
+容错治理同样在容器环境实测（验收标准：下游挂掉时接口快速失败而非线程堆积、熔断状态可观测）：
+给 LLM 与 Whisper 两侧各做一次故障注入。Whisper 侧把容器 `WHISPER_SERVICE_URL` 指向黑洞地址
+`http://192.0.2.1:8090`（SYN 被丢弃，真实失败要等满 10s），3 次真实失败后熔断器 `OPEN`；
+**快速失败的证据是时间**——第 3 次尝试在 `15:22:07.932` 真实超时失败，第 4 次尝试的日志出现在 `15:22:07.94`，
+间隔约 **0.1s**（只够 ffmpeg 抽音频），请求根本没发出去。LLM 侧把容器 `LLM_BASE_URL` 指向连接立即被拒的地址，
+第 5 次 `requestJson` 失败后 `/actuator/circuitbreakers` 报 `failureRate 100.0%`、`bufferedCalls 5`、`failedCalls 5`、`state OPEN`；
+**「没有真的打过去」也有指标支撑**：`workbench_llm_requests_total{outcome="failure"}` 停在 `10`（5 次请求 × 主备两模型）
+而 `resilience4j_circuitbreaker_not_permitted_calls_total{name="llm"}` 涨到 `3`。熔断拒绝被转成 `llm_unavailable` 瞬时故障，
+任务回到 `QUEUED` 走指数退避，退避用尽后进死信留档（`workbench.tasks.dead` 由 4 增至 5，
+`workbench_queue_dead_letters_total{reason="llm_unavailable"} 1`）。恢复地址并重建容器后，两个任务各点一次重试均回到 `COMPLETED/COMPLETED`。
+面板新增五个容错面板，截图见 [`docs/可观测性面板-熔断.png`](docs/可观测性面板-熔断.png)。
+后端 `mvnw verify` 通过：`Tests run: 124, Failures: 0, Errors: 0, Skipped: 3`，Spotless 通过（新增 4 项容错测试）。
+如实记录两处边界：一是**半开探测与退避预算的相对关系会改变结局**——熔断器打开 30s 后进入半开，
+而退避总时长 35s，最后一次重试有时会真的发出去、任务按普通失败落库而不是进死信，两种结局都实测到了；
+二是并发隔板的饱和拒绝目前只有单元测试覆盖（容器里消费者并发为 1，压不出打满，且 Resilience4j 不导出 rejected 计数器）。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 
 ---
 

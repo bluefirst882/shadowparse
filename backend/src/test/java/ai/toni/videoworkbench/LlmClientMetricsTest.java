@@ -102,11 +102,14 @@ class LlmClientMetricsTest {
         new ObjectMapper(),
         new WorkbenchMetrics(registry),
         usageLog,
+        DownstreamResilience.withDefaults(),
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         "test-model",
         "",
-        "low");
+        "low",
+        90,
+        180);
   }
 
   private String successResponse(long promptTokens, long completionTokens) throws Exception {

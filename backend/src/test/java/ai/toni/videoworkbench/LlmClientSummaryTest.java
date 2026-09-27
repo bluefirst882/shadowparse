@@ -112,11 +112,14 @@ class LlmClientSummaryTest {
         json,
         new WorkbenchMetrics(new SimpleMeterRegistry()),
         Mockito.mock(LlmUsageRepository.class),
+        DownstreamResilience.withDefaults(),
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         "test-model",
         "",
-        "low");
+        "low",
+        90,
+        180);
   }
 
   private String chunkResponse(

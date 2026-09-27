@@ -50,6 +50,10 @@ class TaskService {
   private final long timeoutMinutes;
   private final int summaryMaxInputChars;
   private final TaskQueue queue;
+  private final DownstreamResilience resilience;
+  // 复用同一个客户端：HttpClient 自带连接池与选择器线程，每次调用新建一个会持续泄漏线程与连接。
+  private final HttpClient whisperHttp =
+      HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
   private final Map<String, Process> runningProcesses = new ConcurrentHashMap<>();
 
   TaskService(
@@ -67,7 +71,8 @@ class TaskService {
       @Value("${workbench.max-upload-bytes}") long maxUploadBytes,
       @Value("${workbench.process-timeout-minutes}") long timeoutMinutes,
       @Value("${workbench.llm.max-input-chars:60000}") int summaryMaxInputChars,
-      TaskQueue queue) {
+      TaskQueue queue,
+      DownstreamResilience resilience) {
     this.tasks = tasks;
     this.json = json;
     this.llm = llm;
@@ -83,6 +88,7 @@ class TaskService {
     this.timeoutMinutes = timeoutMinutes;
     this.summaryMaxInputChars = summaryMaxInputChars;
     this.queue = queue;
+    this.resilience = resilience;
   }
 
   TaskPage list(String ownerId, TaskCursor cursor, int limit) {
@@ -458,7 +464,7 @@ class TaskService {
     if (whisperServiceToken.isBlank()) throw new IOException("WHISPER_SERVICE_TOKEN 未配置");
     HttpRequest request =
         HttpRequest.newBuilder(URI.create(whisperServiceUrl + "/transcribe"))
-            .timeout(java.time.Duration.ofMinutes(timeoutMinutes))
+            .timeout(Duration.ofMinutes(timeoutMinutes))
             .header("Content-Type", "audio/wav")
             .header("X-Whisper-Token", whisperServiceToken)
             .header("X-Whisper-Model", whisperModel)
@@ -466,17 +472,30 @@ class TaskService {
             .build();
     HttpResponse<String> response;
     try {
+      // 并发隔板 + 熔断器：GPU worker 连续失败时后续调用不再真的发请求，避免拿满超时时间等一个已知挂掉的下游。
       response =
-          HttpClient.newBuilder()
-              .connectTimeout(java.time.Duration.ofSeconds(10))
-              .build()
-              .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+          resilience.call(
+              DownstreamResilience.Target.WHISPER,
+              () ->
+                  whisperHttp.send(
+                      request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)));
     } catch (IOException ex) {
       // 连接被拒、读超时：Whisper worker 可能只是重启中或显存被占满，属于「等一会儿会好」的故障。
       throw new TransientFailure(
           TransientFailure.WHISPER_UNAVAILABLE,
           "Whisper 服务不可达："
               + (ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage()),
+          ex);
+    } catch (InterruptedException ex) {
+      Thread.currentThread().interrupt();
+      throw ex;
+    } catch (Exception ex) {
+      // 熔断打开 / 并发隔板已满：请求没发出去，同样是「等一会儿再试」，交给队列退避重试。
+      throw new TransientFailure(
+          TransientFailure.WHISPER_UNAVAILABLE,
+          (DownstreamResilience.isRejected(ex) ? "Whisper 调用被熔断器或并发隔板拒绝（" : "Whisper 调用失败（")
+              + ex.getClass().getSimpleName()
+              + "）：本次未取得转写结果",
           ex);
     }
     if (tasks.cancelled(id)) throw new Cancelled();

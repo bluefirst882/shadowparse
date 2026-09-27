@@ -220,11 +220,14 @@ class LlmClientFallbackTest {
         json,
         new WorkbenchMetrics(registry),
         Mockito.mock(LlmUsageRepository.class),
+        DownstreamResilience.withDefaults(),
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         primary,
         fallback,
-        "low");
+        "low",
+        90,
+        180);
   }
 
   /** HTTP 替身的一次应答：{@code status} 非 200 时按错误体返回。 */

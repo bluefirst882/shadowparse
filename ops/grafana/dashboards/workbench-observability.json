@@ -12,7 +12,7 @@
   "timezone": "browser",
   "title": "视频工作台可观测性",
   "uid": "workbench-observability",
-  "version": 1,
+  "version": 2,
   "panels": [
     {
       "id": 1,
@@ -438,6 +438,214 @@
           "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
           "expr": "histogram_quantile(0.95, sum by (le) (rate(workbench_queue_wait_seconds_bucket[1h])))",
           "legendFormat": "P95 等待"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "熔断器打开（1 = 已熔断）",
+      "description": "llm / whisper 两个熔断器的状态；1 表示该下游已被熔断，请求不再发出。half_open 不计入这里，见 /actuator/circuitbreakers。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justificationMode": "auto",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "resilience4j_circuitbreaker_state{state=\"open\"}",
+          "legendFormat": "{{name}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "熔断器本地拒绝次数（累计）",
+      "description": "被熔断器挡下、没有发出请求的调用数。它增长而 LLM/Whisper 调用失败数不增长，说明在下游恢复前就没有再打过去。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justificationMode": "auto",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "sum by (name) (resilience4j_circuitbreaker_not_permitted_calls_total)",
+          "legendFormat": "{{name}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "并发隔板剩余名额",
+      "description": "隔板最外层的并发隔离：0 表示该下游并发已满，新调用被本地拒绝（BulkheadFullException）而不是排队堆积线程。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justificationMode": "auto",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "resilience4j_bulkhead_available_concurrent_calls",
+          "legendFormat": "{{name}}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "下游调用结果（熔断器统计，按名称与结果）",
+      "description": "熔断器记录的调用结果。kind=successful 为放行的成功调用，failed 为放行后失败，not_permitted 为被本地拒绝；窗口内 failure_rate 超过 50% 即打开。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "lineInterpolation": "smooth"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "sum by (name, kind) (rate(resilience4j_circuitbreaker_calls_seconds_count[5m]))",
+          "legendFormat": "{{name}} / {{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "下游失败率（熔断判定依据）",
+      "description": "熔断器窗口内的失败率（-1 表示样本数还没到 minimum-number-of-calls，暂不判定）。达到 failure-rate-threshold 就会打开。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "lineInterpolation": "smooth"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "clamp_min(resilience4j_circuitbreaker_failure_rate, 0)",
+          "legendFormat": "{{name}} 失败率"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "vector(50)",
+          "legendFormat": "阈值 50%"
         }
       ]
     }

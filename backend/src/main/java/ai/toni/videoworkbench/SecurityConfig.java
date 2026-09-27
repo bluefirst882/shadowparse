@@ -39,8 +39,13 @@ class SecurityConfig {
                     .permitAll()
                     .requestMatchers("/api/auth/**")
                     .permitAll()
-                    // 指标/健康端点供 compose 网络内的 Prometheus 抓取，未鉴权（见 README「可观测性」取舍说明）。
-                    .requestMatchers("/actuator/health", "/actuator/prometheus")
+                    // 指标/健康/熔断器端点供 compose 网络内的 Prometheus 与 Grafana 读取，未鉴权
+                    // （见 README「可观测性」取舍说明）。
+                    .requestMatchers(
+                        "/actuator/health",
+                        "/actuator/prometheus",
+                        "/actuator/circuitbreakers",
+                        "/actuator/circuitbreakerevents")
                     .permitAll()
                     .anyRequest()
                     .authenticated())

@@ -75,7 +75,8 @@ class TaskPaginationTest {
             1024,
             1,
             60000,
-            Mockito.mock(TaskQueue.class));
+            Mockito.mock(TaskQueue.class),
+            DownstreamResilience.withDefaults());
   }
 
   @AfterEach
