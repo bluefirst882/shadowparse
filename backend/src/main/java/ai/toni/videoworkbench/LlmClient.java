@@ -35,9 +35,6 @@ class LlmClient {
   private static final Pattern TRAILING_KEY_POINT_PUNCTUATION =
       Pattern.compile("[\\s\\p{Z}\\p{P}]+$");
 
-  private static final String SYSTEM_PROMPT = "你是视频内容分析助手，只返回合法 JSON。";
-  private static final String TRANSLATE_SYSTEM_PROMPT = "你是专业字幕翻译助手，只返回合法 JSON。";
-
   private final ObjectMapper json;
   private final HttpClient http =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build();
@@ -126,15 +123,14 @@ class LlmClient {
       source.append('\n');
     }
     String prompt =
-        "以下是对同一份视频分块摘要得到的多段结果，请合并去重后返回 JSON，必须严格符合这个 JSON Schema：\n"
-            + LlmJsonSchema.MERGE.json()
-            + "\n要求：summary 整合各块内容且不重复，keyPoints 合并语义重复的要点，不要新增未出现的信息；只返回 JSON 对象本身，不要 Markdown。"
-            + retryHint(previousError)
-            + "\n"
-            + source;
+        PromptLibrary.MERGE.user(
+            Map.of(
+                "schema", LlmJsonSchema.MERGE.json(),
+                "retryHint", retryHint(previousError),
+                "input", source.toString()));
     JsonNode merged =
         requestJson(
-            "summarize", SYSTEM_PROMPT, prompt, LlmJsonSchema.MERGE, Duration.ofSeconds(90));
+            "summarize", PromptLibrary.MERGE, prompt, LlmJsonSchema.MERGE, Duration.ofSeconds(90));
     List<String> keyPoints = new ArrayList<>();
     for (JsonNode point : merged.path("keyPoints")) keyPoints.add(point.asText());
     return new MergedResult(merged.path("summary").asText(), keyPoints);
@@ -179,15 +175,21 @@ class LlmClient {
     String source =
         transcript.stream().map(LlmClient::sourceLine).collect(Collectors.joining("\n"));
     String prompt =
-        "根据以下带时间戳中文转写生成 JSON，必须严格符合这个 JSON Schema：\n"
-            + LlmJsonSchema.SUMMARIZE.json()
-            + "\n补充约束：chapter 可覆盖连续片段，sourceSegmentId 引用开始片段，sourceEndSegmentId 引用结束片段，单片段章节两个 id 相同；章节时间必须位于首尾引用片段的范围内，按时间排序；quote 必须是逐字摘自所引用片段（sourceSegmentId..sourceEndSegmentId）转写原文的原句，不得改写、翻译或概括，服务端会逐字核验。只返回 JSON 对象本身，不要 Markdown 代码块、不要解释。"
-            + retryHint(previousError)
-            + "\n"
-            + source;
+        PromptLibrary.SUMMARIZE.user(
+            Map.of(
+                "schema",
+                LlmJsonSchema.SUMMARIZE.json(),
+                "retryHint",
+                retryHint(previousError),
+                "input",
+                source));
     JsonNode content =
         requestJson(
-            "summarize", SYSTEM_PROMPT, prompt, LlmJsonSchema.SUMMARIZE, Duration.ofSeconds(90));
+            "summarize",
+            PromptLibrary.SUMMARIZE,
+            prompt,
+            LlmJsonSchema.SUMMARIZE,
+            Duration.ofSeconds(90));
     return json.treeToValue(content, TaskResult.class);
   }
 
@@ -202,11 +204,11 @@ class LlmClient {
         + segment.text();
   }
 
-  /** 把上一次的校验失败原因作为提示词尾部提示；首次调用（无失败）返回空串。 */
+  /** 把上一次的校验失败原因作为提示词尾部的独立一行；首次调用（无失败）返回空串。 */
   private static String retryHint(String previousError) {
     return previousError == null || previousError.isBlank()
         ? ""
-        : "\n上次输出未通过校验：" + previousError + "，请修正后重新返回完整 JSON。";
+        : "上次输出未通过校验：" + previousError + "，请修正后重新返回完整 JSON。\n";
   }
 
   List<TranscriptSegment> translateToChinese(List<TranscriptSegment> transcript) throws Exception {
@@ -219,14 +221,12 @@ class LlmClient {
               .map(s -> "[id=" + s.id() + "] " + s.text())
               .collect(Collectors.joining("\n"));
       String prompt =
-          "将以下非中文视频逐字稿逐条翻译为简体中文，必须严格符合这个 JSON Schema：\n"
-              + LlmJsonSchema.TRANSLATE.json()
-              + "\n必须返回本批全部 id，保留 id，逐条对应，不要省略或合并；只返回 JSON 对象本身，不要 Markdown。\n"
-              + source;
+          PromptLibrary.TRANSLATE.user(
+              Map.of("schema", LlmJsonSchema.TRANSLATE.json(), "input", source));
       JsonNode result =
           requestJson(
               "translate",
-              TRANSLATE_SYSTEM_PROMPT,
+              PromptLibrary.TRANSLATE,
               prompt,
               LlmJsonSchema.TRANSLATE,
               Duration.ofSeconds(180));
@@ -253,7 +253,7 @@ class LlmClient {
    */
   private JsonNode requestJson(
       String operation,
-      String systemPrompt,
+      PromptLibrary.Prompt prompt,
       String userPrompt,
       LlmJsonSchema.Schema schema,
       Duration timeout)
@@ -263,7 +263,7 @@ class LlmClient {
     for (int index = 0; index < models.size(); index++) {
       String current = models.get(index);
       try {
-        return callOnce(current, operation, systemPrompt, userPrompt, schema, timeout);
+        return callOnce(current, operation, prompt, userPrompt, schema, timeout);
       } catch (Exception ex) {
         failure = ex;
         if (index + 1 < models.size()) {
@@ -285,7 +285,7 @@ class LlmClient {
   private JsonNode callOnce(
       String currentModel,
       String operation,
-      String systemPrompt,
+      PromptLibrary.Prompt prompt,
       String userPrompt,
       LlmJsonSchema.Schema schema,
       Duration timeout)
@@ -300,7 +300,7 @@ class LlmClient {
             reasoningEffort,
             "messages",
             List.of(
-                Map.of("role", "system", "content", systemPrompt),
+                Map.of("role", "system", "content", prompt.system()),
                 Map.of("role", "user", "content", userPrompt)),
             "response_format",
             Map.of("type", "json_object"));

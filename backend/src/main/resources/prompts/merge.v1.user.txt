@@ -1,0 +1,4 @@
+以下是对同一份视频分块摘要得到的多段结果，请合并去重后返回 JSON，必须严格符合这个 JSON Schema：
+{{schema}}
+要求：summary 整合各块内容且不重复，keyPoints 合并语义重复的要点，不要新增未出现的信息；只返回 JSON 对象本身，不要 Markdown。
+{{retryHint}}{{input}}
