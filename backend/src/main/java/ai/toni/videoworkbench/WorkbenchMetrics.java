@@ -28,6 +28,8 @@ class WorkbenchMetrics {
   static final String QUEUE_DEPTH = "workbench.queue.depth";
   static final String QUEUE_WAIT = "workbench.queue.wait";
   static final String QUEUE_PUBLISH_FAILURES = "workbench.queue.publish_failures";
+  static final String QUEUE_RETRIES = "workbench.queue.retries";
+  static final String QUEUE_DEAD_LETTERS = "workbench.queue.dead_letters";
 
   private final MeterRegistry registry;
 
@@ -117,5 +119,22 @@ class WorkbenchMetrics {
         .publishPercentileHistogram()
         .register(registry)
         .record(wait);
+  }
+
+  /**
+   * 瞬时故障后安排退避重试的次数。
+   *
+   * <p>{@code reason} 取瞬时故障分类（whisper_unavailable / database_unavailable），{@code attempt}
+   * 是即将进行的第几次尝试： 同一任务的尝试次数随时间递增，用标签就能看出「重试都发生在第几次」。
+   */
+  void recordQueueRetry(String reason, int attempt) {
+    registry
+        .counter(QUEUE_RETRIES, "reason", reason, "attempt", String.valueOf(attempt))
+        .increment();
+  }
+
+  /** 超过重试上限、被转入死信队列的任务数（需要人工处理的事故计数）。 */
+  void recordQueueDeadLetter(String reason) {
+    registry.counter(QUEUE_DEAD_LETTERS, "reason", reason).increment();
   }
 }

@@ -23,6 +23,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
@@ -258,12 +259,23 @@ class TaskService {
    *
    * <p>领取任务是幂等的关键：只有把任务从 {@code QUEUED} 原子改成 {@code PROCESSING} 成功的那个消费者才会往下执行， 因此同一条消息被重复投递（broker
    * 重投、用户反复点重试）也只会真正处理一次。
+   *
+   * <p>失败分两类：可重试的瞬时故障（Whisper 不可达、数据库不可达等）抛 {@link TransientFailure}，任务放回 {@code QUEUED}
+   * 由消费者安排退避重试；其余失败直接落 {@code FAILED}，重试多少次都是同样的结果，不值得占用重试额度。
+   *
+   * @param attempt 本次是第几次尝试，取自重试消息头；首次投递为 1
    */
-  void process(String id) {
+  void process(String id, int attempt) {
     VideoTask task = tasks.find(id).orElse(null);
     if (task == null) {
       log.info("任务已不存在，丢弃投递：taskId={}", id);
       return;
+    }
+    if (attempt > 1 && task.status() == TaskStatus.PROCESSING) {
+      // 这条消息就是它自己的重试投递，而任务还停在 PROCESSING：说明上一次尝试被基础设施故障打断、
+      // 没来得及改状态。先放回 QUEUED 才能重新领取，否则这次重试会被当成重复投递白白丢掉。
+      log.warn("重试投递发现任务仍是 PROCESSING，先放回 QUEUED：taskId={} attempt={}", id, attempt);
+      tasks.releaseProcessing(id);
     }
     if (!tasks.claimForProcessing(id)) {
       // 重复投递（broker 重投、用户连点重试）只会走到这里：原子领取失败即说明别的消费者已经在处理，
@@ -305,10 +317,35 @@ class TaskService {
     } catch (Cancelled ignored) {
       tasks.update(id, TaskStatus.CANCELLED, currentStage, 0, null);
       deleteAudio(id);
+    } catch (TransientFailure ex) {
+      // 瞬时故障：任务放回 QUEUED 等下一次尝试。留成 PROCESSING 的话，重试投递会因为领不到任务而被白白确认。
+      String detail =
+          ex.getMessage() == null ? ex.getClass().getSimpleName() : tail(ex.getMessage());
+      log.warn("任务处理遇到瞬时故障，等待退避重试：taskId={} attempt={} reason={}", id, attempt, ex.reason());
+      tasks.update(
+          id, TaskStatus.QUEUED, currentStage, 0, "第 " + attempt + " 次尝试遇到瞬时故障，稍后自动重试：" + detail);
+      throw ex;
+    } catch (DataAccessException ex) {
+      // 数据库不可达：此刻连「改成 FAILED」都写不进去，交给消费者按瞬时故障处理（退避重试）。
+      throw ex;
     } catch (Exception ex) {
       String detail = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
       tasks.update(id, TaskStatus.FAILED, currentStage, 0, "本地处理失败：" + tail(detail));
     }
+  }
+
+  /** 自动重试次数用尽后把任务判为失败，保留原因供用户判断是否人工重投（重新点「重试」会重新投递并从第 1 次算起）。 */
+  void markRetryExhausted(String taskId, int attempts, String reason, String detail) {
+    VideoTask task = tasks.find(taskId).orElse(null);
+    if (task == null
+        || task.status() == TaskStatus.COMPLETED
+        || task.status() == TaskStatus.CANCELLED) return;
+    tasks.update(
+        taskId,
+        TaskStatus.FAILED,
+        task.stage(),
+        0,
+        "自动重试 " + attempts + " 次仍失败（" + reason + "）：" + tail(detail));
   }
 
   private void generateContent(String id) {
@@ -342,6 +379,9 @@ class TaskService {
           result = candidate;
         } catch (Cancelled ex) {
           throw ex;
+        } catch (TransientFailure ex) {
+          // 瞬时故障重试多少次同一个提示词也没用，立刻上抛交给退避重试，不要消耗这里的 3 次额度。
+          throw ex;
         } catch (ResultValidator.Failure ex) {
           metrics.recordLlmValidationFailure(ex.reason());
           failure = ex;
@@ -355,6 +395,8 @@ class TaskService {
       tasks.update(id, TaskStatus.COMPLETED, TaskStage.COMPLETED, 100, null);
     } catch (Cancelled ignored) {
       tasks.update(id, TaskStatus.CANCELLED, TaskStage.SUMMARY, 0, null);
+    } catch (TransientFailure ex) {
+      throw ex;
     } catch (Exception ex) {
       String detail =
           ex.getMessage() == null ? ex.getClass().getSimpleName() : tail(ex.getMessage());
@@ -422,13 +464,28 @@ class TaskService {
             .header("X-Whisper-Model", whisperModel)
             .POST(HttpRequest.BodyPublishers.ofFile(audio))
             .build();
-    HttpResponse<String> response =
-        HttpClient.newBuilder()
-            .connectTimeout(java.time.Duration.ofSeconds(10))
-            .build()
-            .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    HttpResponse<String> response;
+    try {
+      response =
+          HttpClient.newBuilder()
+              .connectTimeout(java.time.Duration.ofSeconds(10))
+              .build()
+              .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    } catch (IOException ex) {
+      // 连接被拒、读超时：Whisper worker 可能只是重启中或显存被占满，属于「等一会儿会好」的故障。
+      throw new TransientFailure(
+          TransientFailure.WHISPER_UNAVAILABLE,
+          "Whisper 服务不可达："
+              + (ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage()),
+          ex);
+    }
     if (tasks.cancelled(id)) throw new Cancelled();
+    if (response.statusCode() >= 500)
+      throw new TransientFailure(
+          TransientFailure.WHISPER_UNAVAILABLE,
+          "Whisper 服务返回 " + response.statusCode() + "：" + tail(response.body()));
     if (response.statusCode() / 100 != 2)
+      // 4xx 是请求或音频本身不被接受，重试同样会失败，按普通失败处理。
       throw new IOException("Whisper 服务失败：" + tail(response.body()));
     return response.body();
   }

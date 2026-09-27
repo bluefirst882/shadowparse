@@ -128,6 +128,19 @@ class TaskRepository {
         Timestamp.from(Instant.now()));
   }
 
+  /**
+   * 把卡在 {@code PROCESSING} 的单个任务放回 {@code QUEUED}。
+   *
+   * <p>用于重试投递：上一次尝试被基础设施故障（数据库短暂不可达等）打断时任务仍是 {@code PROCESSING}， 不放回去这次重试就领不到它。
+   */
+  boolean releaseProcessing(String id) {
+    return jdbc.update(
+            "update tasks set status='QUEUED',updated_at=? where id=? and status='PROCESSING'",
+            Timestamp.from(Instant.now()),
+            id)
+        == 1;
+  }
+
   @Transactional
   void replaceSegments(String taskId, List<TranscriptSegment> segments) {
     jdbc.update("delete from transcript_segments where task_id=?", taskId);

@@ -22,7 +22,11 @@ import org.springframework.context.annotation.Configuration;
  * <p>路由约定：所有死信都发到 {@link #DEAD_LETTER_EXCHANGE}，用 routing key 区分去向——{@code dead} 进死信队列（人工重投），
  * {@code tasks} 回到主队列（重试等待结束），{@code retry} 进重试队列（等待退避时间）。
  *
- * <p>P2-1 只用得到主队列与死信队列；重试队列在 P2-2 接入退避重试时启用。
+ * <p>重试延迟由消息自身的 TTL 承载（见 {@link RabbitTaskQueue#publishRetry}）：重试队列是同一批消息的等待区，
+ * 到点就回到主队列重新被消费，不需要在进程里 sleep 或维护定时器。
+ *
+ * <p>注意 per-message TTL 只在队头消息上被判定：若队头是 20s 的消息、后面才是 10s 的消息，后者会等到 20s。 本项目默认退避只有 5s / 10s / 20s
+ * 三级，最坏多等 20s，可以接受；要严格按各自 TTL 到期就需要按延迟级别拆多个队列。
  */
 @Configuration
 class TaskQueueConfig {

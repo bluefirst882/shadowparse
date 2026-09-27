@@ -16,6 +16,22 @@ interface TaskQueue {
    */
   void publish(String taskId);
 
+  /**
+   * 把任务投递到重试队列，等 {@code delayMillis} 毫秒后自动回到主队列，作为第 {@code attempt} 次尝试重新消费。
+   *
+   * <p>退避等待交给 broker 的消息 TTL，而不是在进程里 sleep：进程重启、任务取消都不影响这条延迟消息， 也不会占着一个线程等时间。
+   *
+   * @throws UnavailableException broker 不可用，重试消息确定没有投递出去
+   */
+  void publishRetry(String taskId, int attempt, long delayMillis);
+
+  /**
+   * 超出重试上限：把消息投到死信队列留档（不再是待消费的任务，而是等人的事故记录）。
+   *
+   * @throws UnavailableException broker 不可用，死信消息确定没有投递出去
+   */
+  void publishDeadLetter(String taskId, String reason);
+
   /** 队列不可用。调用方据此把任务留在 {@code QUEUED} 并提示用户稍后重试，而不是假装已经入队。 */
   class UnavailableException extends RuntimeException {
     UnavailableException(String message, Throwable cause) {

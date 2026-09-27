@@ -72,7 +72,7 @@ class TaskServiceTest {
     TaskService service = service();
     when(tasks.find("task-1")).thenReturn(Optional.empty());
 
-    assertDoesNotThrow(() -> service.process("task-1"));
+    assertDoesNotThrow(() -> service.process("task-1", 1));
 
     verify(tasks).find("task-1");
     verify(tasks, never()).claimForProcessing("task-1");
@@ -85,9 +85,61 @@ class TaskServiceTest {
     when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.PROCESSING)));
     when(tasks.claimForProcessing("task-1")).thenReturn(false);
 
-    service.process("task-1");
+    service.process("task-1", 1);
 
     verify(tasks).claimForProcessing("task-1");
+    verify(tasks, never()).update(any(), any(), any(), anyInt(), any());
+  }
+
+  /** 重复投递（第 1 次尝试）不会去动仍为 PROCESSING 的任务，避免把别的执行者的活抢过来。 */
+  @Test
+  void doesNotReleaseProcessingTaskOnFirstDelivery() {
+    TaskService service = service();
+    when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.PROCESSING)));
+    when(tasks.claimForProcessing("task-1")).thenReturn(false);
+
+    service.process("task-1", 1);
+
+    verify(tasks, never()).releaseProcessing(any());
+  }
+
+  /** 重试投递遇到上次被故障打断、仍停在 PROCESSING 的任务时，先放回 QUEUED 才能重新领取。 */
+  @Test
+  void releasesTaskLeftProcessingBeforeRetryDelivery() {
+    TaskService service = service();
+    when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.PROCESSING)));
+    when(tasks.claimForProcessing("task-1")).thenReturn(true);
+
+    service.process("task-1", 2);
+
+    verify(tasks).releaseProcessing("task-1");
+    verify(tasks).claimForProcessing("task-1");
+  }
+
+  /** 重试耗尽后任务判为失败，原因写进错误信息供用户决定是否人工重投。 */
+  @Test
+  void marksTaskFailedWhenRetriesAreExhausted() {
+    TaskService service = service();
+    when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.QUEUED)));
+
+    service.markRetryExhausted("task-1", 4, "whisper_unavailable", "Whisper 服务不可达");
+
+    org.mockito.ArgumentCaptor<String> message = org.mockito.ArgumentCaptor.forClass(String.class);
+    verify(tasks).update(eq("task-1"), eq(TaskStatus.FAILED), any(), eq(0), message.capture());
+    org.junit.jupiter.api.Assertions.assertTrue(
+        message.getValue().contains("自动重试 4 次")
+            && message.getValue().contains("whisper_unavailable"),
+        "错误信息应写明重试次数与原因，实际：" + message.getValue());
+  }
+
+  /** 已经成功或已取消的任务不会被迟到的重试耗尽事件改写状态。 */
+  @Test
+  void leavesFinishedTaskUntouchedWhenRetriesAreExhausted() {
+    TaskService service = service();
+    when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.COMPLETED)));
+
+    service.markRetryExhausted("task-1", 4, "whisper_unavailable", "Whisper 服务不可达");
+
     verify(tasks, never()).update(any(), any(), any(), anyInt(), any());
   }
 

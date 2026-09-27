@@ -62,6 +62,13 @@
 队列不可用时任务保持 `QUEUED` 并提示稍后重试，不会假装已经入队；异步拒收由
 `workbench_queue_publish_failures_total` 计数与 ERROR 日志暴露，不让任务「静默停在 QUEUED」。
 
+**失败分流**：可重试的瞬时故障（Whisper 服务不可达 / 超时 / 5xx、数据库短暂不可达）不判死，而是投递到重试队列按
+**指数退避**（默认 5s → 10s → 20s）再来一次，等待时间由消息自身的 TTL 承载——不占线程 sleep，进程重启也不会把等待中的重试丢掉。
+超过 `WORKBENCH_QUEUE_MAX_ATTEMPTS`（默认 4）次后，消息进死信队列留档、任务在库里标为 `FAILED` 并写明重试次数与原因，
+用户在界面上点「重试」即可人工重投（重新投递后从第 1 次算起）。
+反过来，媒体损坏、FFmpeg 退出码非 0 这类「重试多少次都一样」的失败**不占用重试额度**，直接判失败；
+代码缺陷等非瞬时异常同样直接进死信队列，避免反复撞同一堵墙。
+
 任务按阶段推进，每个阶段独立可观测：
 
 | 阶段               | 进度 | 说明                           |
@@ -323,6 +330,8 @@ from llm_calls group by prompt_id, model order by prompt_id, model;
 | 队列深度     | `workbench.queue.depth`            | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge），读自 broker 的真实积压量；broker 不可达时为 `-1` | 无                                         | `RabbitTaskQueue` 构造函数绑定     |
 | 队列等待时长 | `workbench.queue.wait`             | `workbench_queue_wait_seconds`             | 任务从入队到真正开始执行的等待时长直方图（取消息 `timestamp`）  | 无                                         | `TaskQueueConsumer.handle`         |
 | 投递失败次数 | `workbench.queue.publish_failures` | `workbench_queue_publish_failures_total`   | broker 确认（publisher confirm）未成功返回的次数                | 无                                         | `RabbitTaskQueue.publish`          |
+| 退避重试次数 | `workbench.queue.retries`          | `workbench_queue_retries_total`            | 瞬时故障后安排退避重试的次数                                    | `reason=whisper_unavailable/database_unavailable`、`attempt`（即将进行的第几次尝试） | `TaskQueueConsumer.retryLater`     |
+| 死信任务数   | `workbench.queue.dead_letters`     | `workbench_queue_dead_letters_total`       | 超过重试上限、转入死信队列留档的任务数（需要人工处理）           | `reason`                                   | `TaskQueueConsumer.deadLetter`     |
 
 - **usage 解析**：`LlmClient` 原实现只取 `choices[0].message.content`，**并不解析 `usage`**；先前补上 `usage.prompt_tokens` / `usage.completion_tokens` 的读取并累加到指标，现在同一处还会按「任务 + 提示词版本 + 实际模型」写进 `llm_calls` 表，用于单视频成本导出。
 - **队列深度来自 broker**：`WorkbenchMetrics.bindQueueDepth(Supplier<Number>)` 由 `RabbitTaskQueue` 注入数据源，用 `AmqpAdmin.getQueueProperties` 被动读取队列积压量。读不到时返回 `-1`（并在状态翻转时打一条 WARN），而不是回落成 `0`——把「broker 不可达」伪装成「队列为空」会让人误判系统健康。
@@ -475,6 +484,9 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | `RABBITMQ_MANAGEMENT_HOST_PORT`     | 15672                              | RabbitMQ 管理台映射到宿主机的端口                  |
 | `RABBITMQ_USERNAME`                 | `workbench`                        | RabbitMQ 账号（compose 首次初始化时创建）          |
 | `RABBITMQ_PASSWORD`                 | 无（compose 必填）                 | RabbitMQ 密码                                      |
+| `WORKBENCH_QUEUE_MAX_ATTEMPTS`      | 4                                  | 瞬时故障最多尝试几次，用尽后进死信队列              |
+| `WORKBENCH_QUEUE_RETRY_INITIAL_DELAY_MILLIS` | 5000                       | 首次重试前的退避时间（毫秒）                       |
+| `WORKBENCH_QUEUE_RETRY_MULTIPLIER`  | 2                                  | 退避倍率：第 n 次失败后等待「初始延迟 × 倍率^(n-1)」 |
 | `FFMPEG_PATH`                       | `ffmpeg`                           | FFmpeg 可执行文件路径                              |
 | `WHISPER_MODEL`                     | `turbo`                            | Whisper 模型规格                                   |
 | `WHISPER_SERVICE_URL`               | `http://host.docker.internal:8090` | 宿主机 Whisper 服务地址                            |
@@ -540,6 +552,19 @@ Prometheus 目标 `video-workbench-backend` 为 `up`，Grafana 面板与数据�
 - 指标侧：`workbench_queue_depth 0.0`（读自 broker 真实积压量）、`workbench_queue_wait_seconds_count 1`（正常上传路径记录到一次等待时长）、
   `workbench_queue_publish_failures_total` 未出现（本次没有投递失败）。后端 `mvnw verify` 通过：
   `Tests run: 108, Failures: 0, Errors: 0, Skipped: 3`，Spotless 通过。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
+退避重试与死信同样在容器环境实测（验收标准：重试间隔递增可见、超限进入死信并可人工重投）：
+把后端容器的 `WHISPER_SERVICE_URL` 指向一个没人监听的端口（`http://127.0.0.1:9`）做故障注入，
+用 20 秒样本上传一个任务，日志里出现完整的指数退避序列 —— 第 1 次失败 **15:03:14** →「5000 ms 后进行第 2 次尝试」
+→ 第 2 次失败 **15:03:19** →「10000 ms …第 3 次」→ 第 3 次失败 **15:03:30** →「20000 ms …第 4 次」
+→ 第 4 次失败 **15:03:50** →「已达重试上限 4 次，转入死信队列」。此时
+`workbench.tasks.dead` 有 **1** 条消息而主队列与重试队列均为 **0**，任务状态为
+`FAILED/TRANSCRIPTION`，错误信息写明「自动重试 4 次仍失败（whisper_unavailable）：Whisper 服务不可达：ConnectException」；
+指标为 `workbench_queue_retries_total{attempt="2"/"3"/"4",reason="whisper_unavailable"}` 各 `1`
+与 `workbench_queue_dead_letters_total{reason="whisper_unavailable"} 1`。
+恢复 `WHISPER_SERVICE_URL` 后对同一任务 `POST /api/tasks/{id}/retry`（人工重投）即跑通，最终 `COMPLETED/COMPLETED`（100%），
+而死信队列里那条留档消息仍在（重投走的是业务接口，不是消费死信消息）。后端 `mvnw verify` 通过：
+`Tests run: 120, Failures: 0, Errors: 0, Skipped: 3`，Spotless 通过。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 
 ---
 

@@ -1,6 +1,7 @@
 package ai.toni.videoworkbench;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -43,11 +44,7 @@ class RabbitTaskQueueTest {
     verify(template)
         .convertAndSend(
             eq(""), eq(QUEUE), eq("task-1"), processor.capture(), any(CorrelationData.class));
-    Message message =
-        processor
-            .getValue()
-            .postProcessMessage(
-                new Message("task-1".getBytes(StandardCharsets.UTF_8), new MessageProperties()));
+    Message message = processor.getValue().postProcessMessage(newMessage("task-1"));
     assertEquals(MessageDeliveryMode.PERSISTENT, message.getMessageProperties().getDeliveryMode());
   }
 
@@ -84,6 +81,51 @@ class RabbitTaskQueueTest {
     assertEquals(1.0, registry.get("workbench.queue.publish_failures").counter().count());
   }
 
+  /** 重试消息进重试队列等 TTL：退避时间写在消息属性上，不是进程里 sleep。 */
+  @Test
+  void publishesRetryMessageToRetryQueueWithBackoffTtl() {
+    RabbitTaskQueue queue = queue();
+
+    queue.publishRetry("task-1", 3, 20_000L);
+
+    ArgumentCaptor<MessagePostProcessor> processor =
+        ArgumentCaptor.forClass(MessagePostProcessor.class);
+    verify(template)
+        .convertAndSend(
+            eq(TaskQueueConfig.DEAD_LETTER_EXCHANGE),
+            eq(TaskQueueConfig.ROUTING_RETRY),
+            eq("task-1"),
+            processor.capture(),
+            any(CorrelationData.class));
+    Message message = processor.getValue().postProcessMessage(newMessage("task-1"));
+    assertEquals("20000", message.getMessageProperties().getExpiration());
+    assertEquals(
+        3, message.getMessageProperties().getHeaders().get(TaskQueueConsumer.ATTEMPT_HEADER));
+    assertEquals(MessageDeliveryMode.PERSISTENT, message.getMessageProperties().getDeliveryMode());
+  }
+
+  /** 死信消息带上分类原因，方便在管理台里一眼看出是「瞬时故障耗尽重试」还是别的问题。 */
+  @Test
+  void publishesDeadLetterWithReasonHeader() {
+    RabbitTaskQueue queue = queue();
+
+    queue.publishDeadLetter("task-1", "whisper_unavailable");
+
+    ArgumentCaptor<MessagePostProcessor> processor =
+        ArgumentCaptor.forClass(MessagePostProcessor.class);
+    verify(template)
+        .convertAndSend(
+            eq(TaskQueueConfig.DEAD_LETTER_EXCHANGE),
+            eq(TaskQueueConfig.ROUTING_DEAD),
+            eq("task-1"),
+            processor.capture(),
+            any(CorrelationData.class));
+    Message message = processor.getValue().postProcessMessage(newMessage("task-1"));
+    assertEquals(
+        "whisper_unavailable", message.getMessageProperties().getHeaders().get("x-reason"));
+    assertNull(message.getMessageProperties().getExpiration(), "死信消息不应带重试 TTL");
+  }
+
   @Test
   void reportsBrokerSideQueueDepth() {
     Properties properties = new Properties();
@@ -106,5 +148,9 @@ class RabbitTaskQueueTest {
 
   private RabbitTaskQueue queue() {
     return new RabbitTaskQueue(template, admin, metrics, QUEUE);
+  }
+
+  private static Message newMessage(String taskId) {
+    return new Message(taskId.getBytes(StandardCharsets.UTF_8), new MessageProperties());
   }
 }

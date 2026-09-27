@@ -2,6 +2,7 @@ package ai.toni.videoworkbench;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
+import java.util.Map;
 import java.util.Properties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,12 +48,47 @@ class RabbitTaskQueue implements TaskQueue {
 
   @Override
   public void publish(String taskId) {
+    send("", queueName, taskId, Map.of(), null);
+  }
+
+  @Override
+  public void publishRetry(String taskId, int attempt, long delayMillis) {
+    // 重试消息先落在重试队列上等 per-message TTL 到期（不占线程 sleep），到期后由该队列自己的 DLX
+    // 按 ROUTING_TASK 送回主队列，作为一次新的投递被消费。
+    send(
+        TaskQueueConfig.DEAD_LETTER_EXCHANGE,
+        TaskQueueConfig.ROUTING_RETRY,
+        taskId,
+        Map.of(TaskQueueConsumer.ATTEMPT_HEADER, attempt),
+        delayMillis);
+  }
+
+  @Override
+  public void publishDeadLetter(String taskId, String reason) {
+    send(
+        TaskQueueConfig.DEAD_LETTER_EXCHANGE,
+        TaskQueueConfig.ROUTING_DEAD,
+        taskId,
+        Map.of("x-reason", reason),
+        null);
+  }
+
+  /**
+   * 统一投递：持久化 + 时间戳 + 可选 TTL 与自定义头，并统一做发布确认打点。
+   *
+   * @param ttlMillis 非空时设置 per-message TTL（毫秒），用于重试队列的退避等待
+   */
+  private void send(
+      String exchange,
+      String routingKey,
+      String taskId,
+      Map<String, Object> headers,
+      Long ttlMillis) {
     CorrelationData correlation = new CorrelationData(taskId);
     try {
       template.convertAndSend(
-          // 默认交换机：routing key 就是队列名，省掉一个只为转发而存在的交换机。
-          "",
-          queueName,
+          exchange,
+          routingKey,
           taskId,
           message -> {
             MessageProperties properties = message.getMessageProperties();
@@ -61,6 +97,8 @@ class RabbitTaskQueue implements TaskQueue {
             properties.setContentEncoding(StandardCharsets.UTF_8.name());
             // 打上投递时刻：消费端据此计算任务在队列里的真实等待时长（含 broker 侧排队）。
             properties.setTimestamp(new Date());
+            headers.forEach(properties::setHeader);
+            if (ttlMillis != null) properties.setExpiration(String.valueOf(ttlMillis));
             return message;
           },
           correlation);
