@@ -11,6 +11,12 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
   flyway.enabled: true
 server.error.include-message: never
+management:
+  endpoints.web.exposure.include: health,prometheus
+  endpoint.health.show-details: never
+  metrics:
+    tags:
+      application: video-workbench
 logging:
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] %logger{36} - %msg%n"

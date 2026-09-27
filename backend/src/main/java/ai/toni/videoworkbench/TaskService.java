@@ -12,6 +12,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +46,7 @@ class TaskService {
   private final ObjectMapper json;
   private final LlmClient llm;
   private final ResultValidator resultValidator;
+  private final WorkbenchMetrics metrics;
   private final long maxUploadBytes;
   private final long timeoutMinutes;
   private final int summaryMaxInputChars;
@@ -57,6 +59,7 @@ class TaskService {
       ObjectMapper json,
       LlmClient llm,
       ResultValidator resultValidator,
+      WorkbenchMetrics metrics,
       @Value("${workbench.storage-dir}") String storageDir,
       @Value("${workbench.ffmpeg-path}") String ffmpeg,
       @Value("${workbench.whisper-service-url}") String whisperServiceUrl,
@@ -71,6 +74,7 @@ class TaskService {
     this.json = json;
     this.llm = llm;
     this.resultValidator = resultValidator;
+    this.metrics = metrics;
     this.storage = Path.of(storageDir);
     this.ffmpeg = ffmpeg;
     this.whisperServiceUrl = whisperServiceUrl;
@@ -80,9 +84,10 @@ class TaskService {
     this.maxUploadBytes = maxUploadBytes;
     this.timeoutMinutes = timeoutMinutes;
     this.summaryMaxInputChars = summaryMaxInputChars;
-    this.queue =
-        new ThreadPoolExecutor(
-            1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queueCapacity));
+    ArrayBlockingQueue<Runnable> pending = new ArrayBlockingQueue<>(queueCapacity);
+    this.queue = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, pending);
+    // 队列深度绑定进程内队列；P2-1 换成 RabbitMQ 时只替换这里的绑定源。
+    this.metrics.bindQueueDepth(pending::size);
   }
 
   TaskPage list(String ownerId, TaskCursor cursor, int limit) {
@@ -227,10 +232,12 @@ class TaskService {
   private boolean tryEnqueue(String id) {
     if (!scheduledTasks.add(id))
       throw new ResponseStatusException(HttpStatus.CONFLICT, "任务已在队列中或正在处理");
+    Instant enqueuedAt = Instant.now();
     try {
       queue.execute(
           () -> {
             try {
+              metrics.recordQueueWait(Duration.between(enqueuedAt, Instant.now()));
               process(id);
             } finally {
               scheduledTasks.remove(id);
@@ -295,7 +302,7 @@ class TaskService {
       tasks.update(id, TaskStatus.PROCESSING, TaskStage.TRANSCRIPTION, 45, null);
       currentStage = TaskStage.TRANSCRIPTION;
       // Worker emits JSON to stdout; production parser persists each timestamped segment here.
-      persistTranscript(id, runWhisper(id, audio));
+      transcribe(id, audio);
       checkCancelled(id);
       // 转写完成后直接串联内容生成，无需用户手动触发。
       generateContent(id);
@@ -325,6 +332,7 @@ class TaskService {
       TaskResult result = null;
       Exception failure = null;
       for (int attempt = 0; attempt < SUMMARY_ATTEMPTS && result == null; attempt++) {
+        if (attempt > 0) metrics.recordLlmRetry("summarize");
         try {
           TaskResult candidate = llm.summarize(transcript, summaryMaxInputChars);
           checkCancelled(id);
@@ -386,6 +394,17 @@ class TaskService {
   private String tail(String output) {
     String compact = output == null ? "" : output.replaceAll("\\s+", " ").trim();
     return compact.length() <= 240 ? compact : compact.substring(compact.length() - 240);
+  }
+
+  private void transcribe(String id, Path audio) throws Exception {
+    Instant startedAt = Instant.now();
+    boolean success = false;
+    try {
+      persistTranscript(id, runWhisper(id, audio));
+      success = true;
+    } finally {
+      metrics.recordTranscription(Duration.between(startedAt, Instant.now()), success);
+    }
   }
 
   private String runWhisper(String id, Path audio) throws IOException, InterruptedException {

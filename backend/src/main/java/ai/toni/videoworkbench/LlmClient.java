@@ -25,14 +25,17 @@ class LlmClient {
   private final String apiKey;
   private final String model;
   private final String reasoningEffort;
+  private final WorkbenchMetrics metrics;
 
   LlmClient(
       ObjectMapper json,
+      WorkbenchMetrics metrics,
       @Value("${workbench.llm.base-url}") String baseUrl,
       @Value("${workbench.llm.api-key}") String apiKey,
       @Value("${workbench.llm.model}") String model,
       @Value("${workbench.llm.reasoning-effort}") String reasoningEffort) {
     this.json = json;
+    this.metrics = metrics;
     this.baseUrl = baseUrl.replaceAll("/+$", "");
     this.apiKey = apiKey;
     this.model = model;
@@ -102,7 +105,7 @@ class LlmClient {
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
             .build();
-    JsonNode response = send(request, "内容服务");
+    JsonNode response = send(request, "内容服务", "summarize");
     String content = response.path("choices").path(0).path("message").path("content").asText();
     if (content.isBlank()) throw new IllegalStateException("内容服务未返回结果");
     TaskResult result = json.readValue(extractJson(content), TaskResult.class);
@@ -153,7 +156,7 @@ class LlmClient {
               .header("Content-Type", "application/json")
               .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
               .build();
-      JsonNode response = send(request, "翻译服务");
+      JsonNode response = send(request, "翻译服务", "translate");
       String content = response.path("choices").path(0).path("message").path("content").asText();
       JsonNode result = json.readTree(extractJson(content));
       for (JsonNode item : result.path("translations"))
@@ -172,12 +175,28 @@ class LlmClient {
         .toList();
   }
 
-  private JsonNode send(HttpRequest request, String service) throws Exception {
-    HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-    if (response.statusCode() < 200 || response.statusCode() >= 300)
-      throw new IllegalStateException(
-          service + "返回 HTTP " + response.statusCode() + "：" + shortBody(response.body()));
-    return json.readTree(response.body());
+  private JsonNode send(HttpRequest request, String service, String operation) throws Exception {
+    boolean success = false;
+    try {
+      HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+      if (response.statusCode() < 200 || response.statusCode() >= 300)
+        throw new IllegalStateException(
+            service + "返回 HTTP " + response.statusCode() + "：" + shortBody(response.body()));
+      JsonNode body = json.readTree(response.body());
+      recordUsage(body);
+      success = true;
+      return body;
+    } finally {
+      metrics.recordLlmCall(operation, success);
+    }
+  }
+
+  /** 从响应 usage 字段累计 prompt / completion token 用量（未持久化，仅作为运行指标）。 */
+  private void recordUsage(JsonNode response) {
+    JsonNode usage = response.path("usage");
+    if (!usage.isObject()) return;
+    metrics.recordLlmTokens(
+        model, usage.path("prompt_tokens").asLong(), usage.path("completion_tokens").asLong());
   }
 
   private static String shortBody(String body) {

@@ -7,7 +7,7 @@ RUN mvn -B -DskipTests package
 FROM eclipse-temurin:21-jre-jammy
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /build/target/*.jar app.jar
 ENV FFMPEG_PATH=ffmpeg \

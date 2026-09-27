@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # 抓取后端 Actuator 暴露的 Prometheus 指标；backend 为 compose 网络内的服务名。
+  - job_name: video-workbench-backend
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['backend:8080']

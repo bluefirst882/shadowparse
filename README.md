@@ -150,7 +150,8 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 │       │   ├── JwtAuthenticationFilter.java # 从请求中解析令牌并建立身份
 │       │   ├── AuthController.java       # 注册 / 登录接口
 │       │   ├── UserRepository.java       # 用户数据访问
-│       │   ├── LlmClient.java            # LLM 调用（摘要 / 翻译）
+│       │   ├── LlmClient.java            # LLM 调用（摘要 / 翻译，解析 usage 并打点）
+│       │   ├── WorkbenchMetrics.java     # 指标埋点集中入口（Micrometer）
 │       │   ├── ResultValidator.java      # 章节时间轴可信校验
 │       │   ├── ExportService.java        # Markdown / JSON / SRT 导出
 │       │   └── TaskRecovery.java         # 重启后任务恢复
@@ -159,8 +160,11 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 │           └── db/migration/             # Flyway 迁移脚本
 ├── frontend/                        # Vue 3 + TypeScript 工作台界面
 ├── workers/whisper_worker.py        # Whisper 推理进程（输出 JSON）
-├── docs/                            # 需求说明、编码规范、验收记录
-└── compose.yaml                     # MySQL 容器
+├── ops/                             # 可观测性栈配置
+│   ├── prometheus/prometheus.yml         # 抓取 backend:8080/actuator/prometheus
+│   └── grafana/                          # 数据源与面板 provisioning（含面板 JSON）
+├── docs/                            # 需求说明、编码规范、验收记录、面板截图
+└── compose.yaml                     # MySQL / 后端 / 前端 / Prometheus / Grafana
 ```
 
 ---
@@ -209,6 +213,63 @@ FFmpeg 与 Whisper 推理均为外部进程，通过 `ProcessBuilder` 托管：
 
 ---
 
+## 可观测性
+
+后端通过 Spring Boot Actuator + Micrometer 暴露运行指标，由 Prometheus 抓取、Grafana 看图。
+
+### 端点
+
+| 端点                       | 说明                                                          |
+| -------------------------- | ------------------------------------------------------------- |
+| `GET /actuator/health`     | 存活探针，容器 healthcheck 使用；`{"status":"UP"}`            |
+| `GET /actuator/prometheus` | Prometheus 文本格式指标（JVM/HTTP 默认指标 + 下列自定义指标） |
+
+两个端点都在 `SecurityConfig` 中放行，**无需令牌**（取舍见本节末尾）。
+
+### 自定义指标
+
+埋点集中在 `WorkbenchMetrics`，业务代码只调它的方法、不直接依赖 `MeterRegistry`；标签刻意避开任务 id、文件名等高基数维度。
+
+| 类别         | Micrometer 名                      | Prometheus 名                              | 含义                                                            | 标签                                       | 打点位置                           |
+| ------------ | ---------------------------------- | ------------------------------------------ | --------------------------------------------------------------- | ------------------------------------------ | ---------------------------------- |
+| 转写耗时     | `workbench.transcription.duration` | `workbench_transcription_duration_seconds` | 单条任务 Whisper 转写（含片段落库）耗时直方图                   | `outcome=success/failure`                  | `TaskService.transcribe`           |
+| LLM 调用结果 | `workbench.llm.requests`           | `workbench_llm_requests_total`             | 每次 LLM HTTP 调用按结果计数                                    | `operation=summarize/translate`、`outcome` | `LlmClient.send`（`finally` 记账） |
+| LLM 重试次数 | `workbench.llm.retries`            | `workbench_llm_retries_total`              | 摘要生成在单条任务内首次之外的重试次数（最多 3 次尝试）         | `operation`                                | `TaskService.generateContent`      |
+| token 用量   | `workbench.llm.tokens`             | `workbench_llm_tokens_total`               | 从 LLM 响应 `usage` 字段累加的 token 数（仅运行指标，未持久化） | `type=prompt/completion`、`model`          | `LlmClient.recordUsage`            |
+| 队列深度     | `workbench.queue.depth`            | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge）                               | 无                                         | `TaskService` 构造函数绑定         |
+| 队列等待时长 | `workbench.queue.wait`             | `workbench_queue_wait_seconds`             | 任务从入队到真正开始执行的等待时长直方图                        | 无                                         | `TaskService.tryEnqueue`           |
+
+- **usage 解析**：`LlmClient` 原实现只取 `choices[0].message.content`，**并不解析 `usage`**；本次补上 `usage.prompt_tokens` / `usage.completion_tokens` 的读取并累加到指标（按要求不做持久化）。
+- **队列指标的可替换性**：`WorkbenchMetrics.bindQueueDepth(Supplier<Number>)` 由 `TaskService` 注入数据源（当前是有界单线程队列的等待任务数）。P2-1 把进程内队列换成 RabbitMQ 时，只改这一处绑定与调用点，指标名与语义保持不变。
+
+### 启动与看图
+
+```bash
+docker compose up -d --wait      # backend / frontend / mysql / prometheus / grafana 全部 healthy
+```
+
+- Prometheus：<http://localhost:9090>，抓取任务 `video-workbench-backend`，目标 `backend:8080/actuator/prometheus`（容器网络内，无需令牌）。
+- Grafana：<http://localhost:3000>，默认账号 `admin` / `workbench`（可用 `GRAFANA_ADMIN_USER`、`GRAFANA_ADMIN_PASSWORD` 覆盖）。数据源与面板均由 `ops/grafana/provisioning` 自动配置，面板 UID 为 `workbench-observability`。
+
+面板覆盖上述五类指标：LLM 调用成功/失败/重试计数、转写完成次数与平均耗时、当前队列深度，以及 token 用量、LLM 调用次数、转写耗时 P50/P95、队列等待时长四条曲线。
+
+![可观测性面板](docs/可观测性面板.png)
+
+上图来自一次**真实业务路径**：对已有任务触发 `retranscribe` 与 `retry` 后，`/actuator/prometheus` 中 `workbench_transcription_duration_seconds_count{outcome="success"}=2`、`workbench_llm_requests_total{operation="summarize",outcome="success"}=3`、`workbench_llm_tokens_total{type="prompt"}=12690`、`{type="completion"}=29117`，抓取瞬间 `workbench_queue_depth=2`。图中「LLM 调用失败次数」「LLM 重试次数」显示 `No data`，是因为这次运行确实没有失败或重试（该 Counter 只在首次发生时才注册）。为验证这两条路径，另做了一次**故障注入**：把 `LLM_API_KEY` 临时置为无效值后重试任务，得到 `workbench_llm_requests_total{outcome="failure"}=3`、`workbench_llm_retries_total{operation="summarize"}=2`，随后已恢复真实密钥：
+
+![故障注入下的 LLM 失败/重试指标](docs/可观测性面板-故障注入.png)
+
+复现截图：`npm run screenshot:grafana`（默认写入 `docs/可观测性面板.png`，可传文件名参数）。
+
+### 鉴权取舍（如实说明）
+
+`/actuator/health` 与 `/actuator/prometheus` 当前**未做鉴权**，任何能访问后端端口的人都能读取指标。
+这是为了让 compose 网络内的 Prometheus 直接抓取而做的取舍：指标不包含视频内容或密钥，
+但包含调用量、耗时、token 用量与队列状态等运营信息。**真实部署应把这两个端点限制在内网**，
+或用反向代理 / 抓取侧鉴权（如只允许 Prometheus 网段访问、加 Basic Auth），不要直接暴露到公网。
+
+---
+
 ## 数据库结构
 
 Flyway 自动迁移，共 4 张表：
@@ -237,7 +298,7 @@ Compose 默认将容器 MySQL 映射到宿主机 `3307`，避免与其他项目�
 
 MySQL 用户和密码只会在空数据卷首次初始化时创建。如果已有旧卷是用其他账号初始化的，请先备份数据，再执行 `docker compose down --volumes` 后重新初始化，或进入 MySQL 手动创建 `.env` 中的 `MYSQL_USER` 并授权；不要为了测试随意删除包含重要视频/数据库的卷。
 
-工作台访问 `http://localhost:5174`，后端访问 `http://localhost:8081`。Compose 会启动 Nginx 前端、Spring Boot 后端和 MySQL 8.4；Windows 上的 Whisper worker 由 `start-all.ps1` 在宿主机运行，使 PyTorch 能直接使用宿主机 NVIDIA GPU。音视频保存在 `video-storage` 命名卷，MySQL 数据保存在 `mysql-data` 命名卷；模型缓存在 `WHISPER_MODEL_DIR` 指定的宿主机目录。端口可通过 `BACKEND_HOST_PORT` 和 `FRONTEND_HOST_PORT` 修改。
+工作台访问 `http://localhost:5174`，后端访问 `http://localhost:8081`，Prometheus 访问 `http://localhost:9090`，Grafana 访问 `http://localhost:3000`。Compose 会启动 Nginx 前端、Spring Boot 后端、MySQL 8.4 以及 Prometheus / Grafana 可观测性栈；Windows 上的 Whisper worker 由 `start-all.ps1` 在宿主机运行，使 PyTorch 能直接使用宿主机 NVIDIA GPU。音视频保存在 `video-storage` 命名卷，MySQL 数据保存在 `mysql-data` 命名卷，Prometheus / Grafana 数据分别保存在 `prometheus-data`、`grafana-data` 命名卷；模型缓存在 `WHISPER_MODEL_DIR` 指定的宿主机目录。端口可通过 `BACKEND_HOST_PORT`、`FRONTEND_HOST_PORT`、`PROMETHEUS_HOST_PORT` 和 `GRAFANA_HOST_PORT` 修改。
 
 停止容器但保留视频、模型和数据库：
 
@@ -315,19 +376,23 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 
 ## 配置项
 
-| 变量                                | 默认值                             | 说明                                           |
-| ----------------------------------- | ---------------------------------- | ---------------------------------------------- |
-| `WORKBENCH_STORAGE_DIR`             | `./storage`                        | 视频、音频与模型文件的本机存放目录             |
-| `WORKBENCH_MAX_UPLOAD_BYTES`        | 20GB                               | 单个视频大小上限                               |
-| `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 180                                | 外部进程超时时间；首次下载模型时应保留充足时间 |
-| `FFMPEG_PATH`                       | `ffmpeg`                           | FFmpeg 可执行文件路径                          |
-| `WHISPER_MODEL`                     | `turbo`                            | Whisper 模型规格                               |
-| `WHISPER_SERVICE_URL`               | `http://host.docker.internal:8090` | 宿主机 Whisper 服务地址                        |
-| `WHISPER_MODEL_DIR`                 | `E:/model/whisper`                 | 宿主机模型缓存目录                             |
-| `WORKBENCH_JWT_SECRET`              | 无（必填）                         | JWT 签名密钥，至少 32 字符，需自行随机生成     |
-| `WORKBENCH_TOKEN_TTL_HOURS`         | 24                                 | 令牌有效期（小时）                             |
-| `LLM_API_KEY`                       | 空                                 | 云端 LLM 密钥，留空则跳过摘要阶段              |
-| `LLM_MAX_INPUT_CHARS`               | 60000                              | 单次摘要请求的字符上限，按完整转写片段分批     |
+| 变量                                | 默认值                             | 说明                                               |
+| ----------------------------------- | ---------------------------------- | -------------------------------------------------- |
+| `WORKBENCH_STORAGE_DIR`             | `./storage`                        | 视频、音频与模型文件的本机存放目录                 |
+| `WORKBENCH_MAX_UPLOAD_BYTES`        | 20GB                               | 单个视频大小上限                                   |
+| `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 180                                | 外部进程超时时间；首次下载模型时应保留充足时间     |
+| `FFMPEG_PATH`                       | `ffmpeg`                           | FFmpeg 可执行文件路径                              |
+| `WHISPER_MODEL`                     | `turbo`                            | Whisper 模型规格                                   |
+| `WHISPER_SERVICE_URL`               | `http://host.docker.internal:8090` | 宿主机 Whisper 服务地址                            |
+| `WHISPER_MODEL_DIR`                 | `E:/model/whisper`                 | 宿主机模型缓存目录                                 |
+| `WORKBENCH_JWT_SECRET`              | 无（必填）                         | JWT 签名密钥，至少 32 字符，需自行随机生成         |
+| `WORKBENCH_TOKEN_TTL_HOURS`         | 24                                 | 令牌有效期（小时）                                 |
+| `LLM_API_KEY`                       | 空                                 | 云端 LLM 密钥，留空则跳过摘要阶段                  |
+| `LLM_MAX_INPUT_CHARS`               | 60000                              | 单次摘要请求的字符上限，按完整转写片段分批         |
+| `PROMETHEUS_HOST_PORT`              | 9090                               | Prometheus 映射到宿主机的端口                      |
+| `GRAFANA_HOST_PORT`                 | 3000                               | Grafana 映射到宿主机的端口                         |
+| `GRAFANA_ADMIN_USER`                | `admin`                            | Grafana 管理员账号                                 |
+| `GRAFANA_ADMIN_PASSWORD`            | `workbench`                        | Grafana 管理员密码（仅本地开发默认值，请按需修改） |
 
 > 密钥仅由后端读取，不会写入日志、前端响应或导出文件。
 
@@ -349,7 +414,12 @@ MySQL 8.4 隔离容器中 Flyway 迁移执行，以及 1 个真实视频的完�
 鉴权与归属已在容器环境实测：无令牌与伪造令牌均返回 `401`；新注册账号调用任务列表、详情、视频流、导出、取消、删除访问种子账号的历史任务全部返回 `403`；迁移将原有 3 条无主任务回填给 `demo` 且 `owner_id` 已收紧为非空（`0` 条空值）；
 前端从登录页到列表、注册新账号后列表为空的完整路径已通过浏览器验证。
 中文真实视频已补充：输入 `E:\Downloads\Video\27210678708-1-192.mp4`，媒体时长 355.947 秒，H.264/AAC；本地 Whisper `turbo`、RTX 4060 Laptop GPU，上传到任务完成约 58 秒，持久化 250 个片段，任务保留为 `COMPLETED/SUMMARY` 并提示摘要可单独重试。检查发现尾部若干片段超出媒体时长，未将该样本表述为时间轴校验通过。以上数据仅对应样本，不能外推为通用成功率或准确率。
-详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
+可观测性已在容器环境实测：`docker compose build backend` + `docker compose up -d --wait` 后五个服务全部 healthy；
+对 `demo` 的已有任务触发 `retranscribe` / `retry`，`/actuator/prometheus` 出现五类自定义指标的非零样本
+（转写耗时 `count=2`、LLM 调用成功、token `prompt=12690 / completion=29117`、队列深度抓取到 `2`、队列等待时长有样本），
+Prometheus 目标 `video-workbench-backend` 为 `up`，Grafana 面板与数据源由 provisioning 自动加载；
+额外用一次故障注入（临时失效 `LLM_API_KEY`）验证了 LLM 失败与重试路径。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 
 ---
 

@@ -182,6 +182,7 @@ class TaskServiceTest {
         new ObjectMapper(),
         llm,
         new ResultValidator(),
+        new WorkbenchMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
         storage.toString(),
         "ffmpeg",
         "http://127.0.0.1:8090",

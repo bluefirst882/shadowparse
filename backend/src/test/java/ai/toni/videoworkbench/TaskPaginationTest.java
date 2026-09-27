@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -64,6 +65,7 @@ class TaskPaginationTest {
             new ObjectMapper(),
             Mockito.mock(LlmClient.class),
             new ResultValidator(),
+            new WorkbenchMetrics(new SimpleMeterRegistry()),
             "target/task-pagination-storage",
             "ffmpeg",
             "http://127.0.0.1:8090",
