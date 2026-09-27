@@ -16,14 +16,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpStatus;
@@ -34,6 +31,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 @Service
 class TaskService {
+  private static final Logger log = LoggerFactory.getLogger(TaskService.class);
   private static final int SUMMARY_ATTEMPTS = 3;
 
   private final TaskRepository tasks;
@@ -50,9 +48,8 @@ class TaskService {
   private final long maxUploadBytes;
   private final long timeoutMinutes;
   private final int summaryMaxInputChars;
-  private final ExecutorService queue;
+  private final TaskQueue queue;
   private final Map<String, Process> runningProcesses = new ConcurrentHashMap<>();
-  private final Set<String> scheduledTasks = ConcurrentHashMap.newKeySet();
 
   TaskService(
       TaskRepository tasks,
@@ -69,7 +66,7 @@ class TaskService {
       @Value("${workbench.max-upload-bytes}") long maxUploadBytes,
       @Value("${workbench.process-timeout-minutes}") long timeoutMinutes,
       @Value("${workbench.llm.max-input-chars:60000}") int summaryMaxInputChars,
-      @Value("${workbench.queue-capacity:10}") int queueCapacity) {
+      TaskQueue queue) {
     this.tasks = tasks;
     this.json = json;
     this.llm = llm;
@@ -84,10 +81,7 @@ class TaskService {
     this.maxUploadBytes = maxUploadBytes;
     this.timeoutMinutes = timeoutMinutes;
     this.summaryMaxInputChars = summaryMaxInputChars;
-    ArrayBlockingQueue<Runnable> pending = new ArrayBlockingQueue<>(queueCapacity);
-    this.queue = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, pending);
-    // 队列深度绑定进程内队列；P2-1 换成 RabbitMQ 时只替换这里的绑定源。
-    this.metrics.bindQueueDepth(pending::size);
+    this.queue = queue;
   }
 
   TaskPage list(String ownerId, TaskCursor cursor, int limit) {
@@ -142,20 +136,26 @@ class TaskService {
               now);
       tasks.save(task, ownerId);
       persisted = true;
-      if (tryEnqueue(id)) return task;
-      String message = "处理队列已满，任务已保存，可稍后重试";
-      tasks.update(id, TaskStatus.QUEUED, TaskStage.IMPORT, 0, message);
-      return new VideoTask(
-          task.id(),
-          task.fileName(),
-          task.videoPath(),
-          task.sizeBytes(),
-          task.status(),
-          task.stage(),
-          task.progress(),
-          message,
-          task.createdAt(),
-          Instant.now());
+      try {
+        queue.publish(id);
+        return task;
+      } catch (TaskQueue.UnavailableException ex) {
+        // 队列不可用时任务留在 QUEUED：库里已有记录，broker 恢复后可重试或由启动恢复重投，
+        // 不能因为投递失败就把刚上传的视频判成失败。
+        String message = "消息队列暂不可用，任务已保存，可稍后重试";
+        tasks.update(id, TaskStatus.QUEUED, TaskStage.IMPORT, 0, message);
+        return new VideoTask(
+            task.id(),
+            task.fileName(),
+            task.videoPath(),
+            task.sizeBytes(),
+            task.status(),
+            task.stage(),
+            task.progress(),
+            message,
+            task.createdAt(),
+            Instant.now());
+      }
     } catch (IOException ex) {
       deleteIfExists(target);
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "无法保存视频文件");
@@ -224,29 +224,12 @@ class TaskService {
     tasks.delete(id);
   }
 
+  /** 投递任务；broker 不可用时明确失败，不假装已经入队。重复投递由领取时的原子更新兜底。 */
   private void enqueue(String id) {
-    if (!tryEnqueue(id))
-      throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "处理队列已满，请稍后重试");
-  }
-
-  private boolean tryEnqueue(String id) {
-    if (!scheduledTasks.add(id))
-      throw new ResponseStatusException(HttpStatus.CONFLICT, "任务已在队列中或正在处理");
-    Instant enqueuedAt = Instant.now();
     try {
-      queue.execute(
-          () -> {
-            try {
-              metrics.recordQueueWait(Duration.between(enqueuedAt, Instant.now()));
-              process(id);
-            } finally {
-              scheduledTasks.remove(id);
-            }
-          });
-      return true;
-    } catch (java.util.concurrent.RejectedExecutionException ex) {
-      scheduledTasks.remove(id);
-      return false;
+      queue.publish(id);
+    } catch (TaskQueue.UnavailableException ex) {
+      throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "消息队列暂不可用，请稍后重试", ex);
     }
   }
 
@@ -254,7 +237,6 @@ class TaskService {
   void stop() {
     runningProcesses.values().forEach(Process::destroyForcibly);
     runningProcesses.clear();
-    queue.shutdownNow();
   }
 
   void recoverAfterRestart() {
@@ -266,15 +248,29 @@ class TaskService {
               try {
                 enqueue(task.id());
               } catch (ResponseStatusException ignored) {
-                // It remains QUEUED and can be retried after the bounded local queue drains.
+                // broker 暂不可用：任务保持 QUEUED，恢复后可由用户重试或下次启动时重投。
               }
             });
   }
 
-  private void process(String id) {
+  /**
+   * 处理单个任务。由队列消费者调用（{@link TaskQueueConsumer}），不直接暴露给 HTTP 调用方。
+   *
+   * <p>领取任务是幂等的关键：只有把任务从 {@code QUEUED} 原子改成 {@code PROCESSING} 成功的那个消费者才会往下执行， 因此同一条消息被重复投递（broker
+   * 重投、用户反复点重试）也只会真正处理一次。
+   */
+  void process(String id) {
     VideoTask task = tasks.find(id).orElse(null);
-    if (task == null) return;
-    if (!tasks.claimForProcessing(id)) return;
+    if (task == null) {
+      log.info("任务已不存在，丢弃投递：taskId={}", id);
+      return;
+    }
+    if (!tasks.claimForProcessing(id)) {
+      // 重复投递（broker 重投、用户连点重试）只会走到这里：原子领取失败即说明别的消费者已经在处理，
+      // 或任务已经结束，直接确认掉这条消息即可。
+      log.info("任务已被领取或已结束，跳过重复投递：taskId={}", id);
+      return;
+    }
     TaskStage currentStage = task.stage();
     try {
       if (currentStage == TaskStage.SUMMARY) {

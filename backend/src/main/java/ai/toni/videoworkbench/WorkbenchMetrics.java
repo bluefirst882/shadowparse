@@ -12,8 +12,8 @@ import org.springframework.stereotype.Component;
  *
  * <p>业务代码只调用这里的方法，不直接依赖 {@link MeterRegistry}：指标名与标签在此统一约定， 避免任务 id、文件名等高基数维度进入标签。
  *
- * <p>队列相关指标通过 {@link Supplier} 绑定数据源，业务侧不感知底层队列类型：当前绑定进程内 有界队列的 {@code size()}；P2-1 换成 RabbitMQ
- * 时只需替换绑定源与调用点，指标名与语义保持不变。
+ * <p>队列相关指标通过 {@link Supplier} 绑定数据源，业务侧不感知底层队列类型：队列外置后由 {@code RabbitTaskQueue} 绑定 broker
+ * 侧的真实积压量，指标名与语义保持不变。
  */
 @Component
 class WorkbenchMetrics {
@@ -27,6 +27,7 @@ class WorkbenchMetrics {
   static final String LLM_TOKENS = "workbench.llm.tokens";
   static final String QUEUE_DEPTH = "workbench.queue.depth";
   static final String QUEUE_WAIT = "workbench.queue.wait";
+  static final String QUEUE_PUBLISH_FAILURES = "workbench.queue.publish_failures";
 
   private final MeterRegistry registry;
 
@@ -98,6 +99,15 @@ class WorkbenchMetrics {
         .description("当前排队等待处理的任务数")
         .strongReference(true)
         .register(registry);
+  }
+
+  /**
+   * 消息未被 broker 确认的次数。
+   *
+   * <p>投递失败的后果是任务停在 {@code QUEUED} 不执行，属于「静默失效」，因此必须打点而不是只写日志。
+   */
+  void recordQueuePublishFailure() {
+    registry.counter(QUEUE_PUBLISH_FAILURES).increment();
   }
 
   /** 任务从入队到真正开始执行的等待时长。 */

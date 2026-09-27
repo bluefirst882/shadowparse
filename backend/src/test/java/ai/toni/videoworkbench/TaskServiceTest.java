@@ -6,19 +6,15 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Optional;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.http.HttpStatus;
@@ -31,42 +27,32 @@ class TaskServiceTest {
 
   private final TaskRepository tasks = Mockito.mock(TaskRepository.class);
   private final LlmClient llm = Mockito.mock(LlmClient.class);
+  private final TaskQueue queue = Mockito.mock(TaskQueue.class);
 
   @Test
-  void requeuesQueuedTaskThatWasNotPreviouslyScheduled() {
+  void publishesQueuedTaskForRetryWithoutResetting() {
     TaskService service = service();
     when(tasks.findOwned("task-1", OWNER)).thenReturn(Optional.of(task(TaskStatus.QUEUED)));
-    when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.QUEUED)));
-    when(tasks.claimForProcessing("task-1")).thenReturn(false);
 
     assertDoesNotThrow(() -> service.retry("task-1", OWNER));
 
-    verify(tasks, timeout(1000)).claimForProcessing("task-1");
+    verify(queue).publish("task-1");
     verify(tasks, never()).reset(any(), any());
   }
 
   @Test
-  void rejectsDuplicateRetryWhileQueuedTaskIsAlreadyScheduled() throws Exception {
+  void reportsServiceUnavailableWhenRetryCannotBePublished() {
     TaskService service = service();
-    CountDownLatch claimStarted = new CountDownLatch(1);
-    CountDownLatch releaseClaim = new CountDownLatch(1);
     when(tasks.findOwned("task-1", OWNER)).thenReturn(Optional.of(task(TaskStatus.QUEUED)));
-    when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.QUEUED)));
-    when(tasks.claimForProcessing("task-1"))
-        .thenAnswer(
-            ignored -> {
-              claimStarted.countDown();
-              releaseClaim.await(1, TimeUnit.SECONDS);
-              return false;
-            });
+    Mockito.doThrow(new TaskQueue.UnavailableException("broker down", new RuntimeException()))
+        .when(queue)
+        .publish("task-1");
 
-    service.retry("task-1", OWNER);
-    org.junit.jupiter.api.Assertions.assertTrue(claimStarted.await(1, TimeUnit.SECONDS));
     ResponseStatusException error =
         assertThrows(ResponseStatusException.class, () -> service.retry("task-1", OWNER));
-    releaseClaim.countDown();
 
-    org.junit.jupiter.api.Assertions.assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+    org.junit.jupiter.api.Assertions.assertEquals(
+        HttpStatus.SERVICE_UNAVAILABLE, error.getStatusCode());
   }
 
   @Test
@@ -82,16 +68,27 @@ class TaskServiceTest {
   }
 
   @Test
-  void ignoresQueueEntryForTaskDeletedBeforeProcessing() throws Exception {
+  void ignoresDeliveryForTaskDeletedBeforeProcessing() {
     TaskService service = service();
     when(tasks.find("task-1")).thenReturn(Optional.empty());
 
-    Method process = TaskService.class.getDeclaredMethod("process", String.class);
-    process.setAccessible(true);
-    assertDoesNotThrow(() -> process.invoke(service, "task-1"));
+    assertDoesNotThrow(() -> service.process("task-1"));
 
     verify(tasks).find("task-1");
     verify(tasks, never()).claimForProcessing("task-1");
+  }
+
+  /** 重复投递的兜底：只有把任务从 QUEUED 原子改成 PROCESSING 成功的那次投递才会真正执行。 */
+  @Test
+  void ignoresDuplicateDeliveryWhenTaskIsAlreadyClaimed() {
+    TaskService service = service();
+    when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.PROCESSING)));
+    when(tasks.claimForProcessing("task-1")).thenReturn(false);
+
+    service.process("task-1");
+
+    verify(tasks).claimForProcessing("task-1");
+    verify(tasks, never()).update(any(), any(), any(), anyInt(), any());
   }
 
   @Test
@@ -121,43 +118,26 @@ class TaskServiceTest {
   }
 
   @Test
-  void savesTaskWithRetryHintWhenQueueIsFull() throws Exception {
+  void savesTaskWithRetryHintWhenQueueIsUnavailable() throws Exception {
     Path storage = Files.createTempDirectory("task-service-queue-test");
-    CountDownLatch claimStarted = new CountDownLatch(1);
-    CountDownLatch releaseClaim = new CountDownLatch(1);
     TaskService service = service(storage);
     try {
-      when(tasks.findOwned("running", OWNER))
-          .thenReturn(Optional.of(task("running", TaskStatus.QUEUED)));
-      when(tasks.findOwned("waiting", OWNER))
-          .thenReturn(Optional.of(task("waiting", TaskStatus.QUEUED)));
-      when(tasks.find("running")).thenReturn(Optional.of(task("running", TaskStatus.QUEUED)));
-      when(tasks.find("waiting")).thenReturn(Optional.of(task("waiting", TaskStatus.QUEUED)));
-      when(tasks.claimForProcessing("running"))
-          .thenAnswer(
-              ignored -> {
-                claimStarted.countDown();
-                releaseClaim.await(1, TimeUnit.SECONDS);
-                return false;
-              });
-      when(tasks.claimForProcessing("waiting")).thenReturn(false);
+      Mockito.doThrow(new TaskQueue.UnavailableException("broker down", new RuntimeException()))
+          .when(queue)
+          .publish(any());
 
-      service.retry("running", OWNER);
-      org.junit.jupiter.api.Assertions.assertTrue(claimStarted.await(1, TimeUnit.SECONDS));
-      service.retry("waiting", OWNER);
       VideoTask imported =
           service.importVideo(
               new MockMultipartFile("file", "queued.mp4", "video/mp4", new byte[] {1, 2, 3}),
               OWNER);
 
       org.junit.jupiter.api.Assertions.assertEquals(TaskStatus.QUEUED, imported.status());
-      org.junit.jupiter.api.Assertions.assertTrue(imported.errorMessage().contains("队列已满"));
+      org.junit.jupiter.api.Assertions.assertTrue(imported.errorMessage().contains("消息队列暂不可用"));
       verify(tasks, times(1)).save(any(), eq(OWNER));
       verify(tasks)
           .update(
               any(), org.mockito.ArgumentMatchers.eq(TaskStatus.QUEUED), any(), anyInt(), any());
     } finally {
-      releaseClaim.countDown();
       service.stop();
       try (var files = Files.list(storage)) {
         files.forEach(
@@ -192,7 +172,7 @@ class TaskServiceTest {
         1024,
         1,
         60000,
-        1);
+        queue);
   }
 
   private VideoTask task(TaskStatus status) {

@@ -75,7 +75,7 @@ class TaskPaginationTest {
             1024,
             1,
             60000,
-            1);
+            Mockito.mock(TaskQueue.class));
   }
 
   @AfterEach

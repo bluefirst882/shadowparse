@@ -10,6 +10,20 @@ spring:
     password: ${MYSQL_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
   flyway.enabled: true
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    # 发布确认：broker 拒收时通过回调打点，避免「投递失败却以为入队成功」。
+    publisher-confirm-type: correlated
+    listener:
+      simple:
+        # 手动 ack：只有真正处理完（或按策略重投/进死信）才确认，进程崩溃时消息会被重新投递。
+        acknowledge-mode: manual
+        prefetch: ${WORKBENCH_QUEUE_PREFETCH:1}
+        concurrency: 1
+        max-concurrency: 1
 server.error.include-message: never
 management:
   endpoints.web.exposure.include: health,prometheus
@@ -24,7 +38,12 @@ workbench:
   storage-dir: ${WORKBENCH_STORAGE_DIR:./storage}
   max-upload-bytes: ${WORKBENCH_MAX_UPLOAD_BYTES:21474836480}
   process-timeout-minutes: ${WORKBENCH_PROCESS_TIMEOUT_MINUTES:30}
-  queue-capacity: ${WORKBENCH_QUEUE_CAPACITY:10}
+  queue:
+    task-queue: ${WORKBENCH_TASK_QUEUE:workbench.tasks}
+    dead-letter-queue: ${WORKBENCH_TASK_DLQ:workbench.tasks.dead}
+    max-attempts: ${WORKBENCH_QUEUE_MAX_ATTEMPTS:4}
+    retry-initial-delay-millis: ${WORKBENCH_QUEUE_RETRY_INITIAL_DELAY_MILLIS:5000}
+    retry-multiplier: ${WORKBENCH_QUEUE_RETRY_MULTIPLIER:2}
   ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
   security:
     jwt-secret: ${WORKBENCH_JWT_SECRET:}

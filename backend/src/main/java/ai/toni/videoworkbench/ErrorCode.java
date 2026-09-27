@@ -16,7 +16,6 @@ enum ErrorCode {
   METHOD_NOT_ALLOWED(HttpStatus.METHOD_NOT_ALLOWED, "请求方法不被支持"),
   CONFLICT(HttpStatus.CONFLICT, "请求与当前状态冲突"),
   PAYLOAD_TOO_LARGE(HttpStatus.PAYLOAD_TOO_LARGE, "上传内容超过大小限制"),
-  QUEUE_FULL(HttpStatus.TOO_MANY_REQUESTS, "请求过于频繁，请稍后重试"),
   INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "服务器内部错误，请稍后重试");
 
   private final HttpStatus status;

@@ -23,9 +23,9 @@
 ## 核心流程
 
 ```
-视频导入 → FFmpeg 音频抽取 → Whisper 语音转写 → 自动生成摘要/章节 → 结果校验 → 多格式导出
-              │                    │                    │                │
-          16kHz 单声道        turbo 模型（GPU）     JSON 结构化输出   章节时间轴 + 引文校验
+视频导入 → 落库 QUEUED → 投递队列 → FFmpeg 音频抽取 → Whisper 语音转写 → 自动生成摘要/章节 → 结果校验 → 多格式导出
+                                        │                    │                │
+                                  16kHz 单声道        turbo 模型（GPU）     JSON 结构化输出   章节时间轴 + 引文校验
 ```
 
 ---
@@ -36,6 +36,7 @@
 | ----------- | ---------------------------------------------------- |
 | 后端        | Java 21、Spring Boot 3.5、Spring JDBC、Maven         |
 | 数据库      | MySQL 8 + Flyway 版本迁移                            |
+| 消息队列    | RabbitMQ 4（持久化队列 + 手动 ack，幂等由数据库条件更新保证） |
 | AI / 音视频 | Whisper（turbo）、FFmpeg、LLM API（结构化输出）      |
 | 前端        | Vue 3、TypeScript、Vite、Element Plus                |
 | 工程化      | JUnit、Spotless + google-java-format、Docker Compose |
@@ -51,9 +52,15 @@
 
 ### 1. 异步任务编排与故障恢复
 
-以**有界单线程队列**串行推进任务，用 `ConcurrentHashMap` 持有运行中的外部进程句柄，
-以保护本地推理资源；队列满时新任务仍保存为 `QUEUED` 并返回可重试提示。任务通过数据库条件更新原子领取，
-避免重复入队导致同一视频被并行处理。
+任务是**先落库为 `QUEUED`，再投递消息**：队列外置到 RabbitMQ（持久化队列 + 持久化消息 + 手动 ack），
+消费端并发固定为 1、prefetch 为 1，用 `ConcurrentHashMap` 持有运行中的外部进程句柄，
+以保护本地推理资源；处理完才确认，进程被杀时那条未确认的消息会被 broker 重新投递。
+
+**幂等不靠队列，靠数据库**：真正执行前必须先把任务从 `QUEUED` 原子改成 `PROCESSING`
+（`update ... where id=? and status='QUEUED' and cancelled=false`）。重复投递的第二次必然领不到，直接确认丢弃——
+所以「broker 重投」「用户连点重试」「多实例同时消费」都只会真正处理一次。
+队列不可用时任务保持 `QUEUED` 并提示稍后重试，不会假装已经入队；异步拒收由
+`workbench_queue_publish_failures_total` 计数与 ERROR 日志暴露，不让任务「静默停在 QUEUED」。
 
 任务按阶段推进，每个阶段独立可观测：
 
@@ -69,7 +76,7 @@
 
 - **一次提交自动跑完**：上传后自动完成音频提取、转写与内容生成，转写结束即串联摘要与章节，无需手动触发；摘要阶段校验不通过会自动重新生成，最多 3 次。
 - **重试边界**：已保留转写的任务可单独重试摘要；其他失败任务从本地处理重新开始。
-- **重启恢复**：服务启动时将残留的 `PROCESSING` 任务改回 `QUEUED` 并尝试入队；队列满时任务保留为 `QUEUED`，可在队列排空后重试。
+- **重启恢复**：消息与队列都是持久化的，崩溃时未确认的消息由 broker 重投；服务启动时先把残留的 `PROCESSING` 任务改回 `QUEUED` 并重投，**再**开始消费（顺序反了会让重投的消息因为任务仍是 `PROCESSING` 而被白白确认）。消息放进队列的环节由 `TaskService.recoverAfterRestart()` 与 `TaskQueueConsumer.start()` 共同保证。
 - **产物一致性**：任务记录写入失败时回收刚上传的视频；删除任务时若本地视频或音频清理失败，则保留任务记录并返回错误，避免产生不可追踪的本地文件。
 - **转写与摘要解耦**：未配置云端密钥时任务以「本地转写已完成」状态保留，
   配置后可单独重试内容生成，不丢失已完成的转写结果
@@ -203,6 +210,10 @@ from llm_calls group by prompt_id, model order by prompt_id, model;
 │       ├── java/ai/toni/videoworkbench/
 │       │   ├── TaskController.java       # REST 接口（鉴权后按账号隔离）
 │       │   ├── TaskService.java          # 任务编排与外部进程托管
+│       │   ├── TaskQueue.java            # 任务队列接口（投递 + 队列不可用异常）
+│       │   ├── RabbitTaskQueue.java      # RabbitMQ 实现（持久化投递、确认打点、broker 侧深度）
+│       │   ├── TaskQueueConfig.java      # 队列 / 死信 / 重试拓扑声明
+│       │   ├── TaskQueueConsumer.java    # 消费端（手动 ack、等待计时、启动时机受控）
 │       │   ├── TaskRepository.java       # JDBC 数据访问（读写强制带 owner）
 │       │   ├── TaskCursor.java           # 列表游标编解码（不透明 keyset 游标）
 │       │   ├── TaskPage.java             # 任务列表分页响应
@@ -233,7 +244,7 @@ from llm_calls group by prompt_id, model order by prompt_id, model;
 │   ├── prometheus/prometheus.yml         # 抓取 backend:8080/actuator/prometheus
 │   └── grafana/                          # 数据源与面板 provisioning（含面板 JSON）
 ├── docs/                            # 需求说明、编码规范、验收记录、面板截图
-└── compose.yaml                     # MySQL / 后端 / 前端 / Prometheus / Grafana
+└── compose.yaml                     # MySQL / RabbitMQ / 后端 / 前端 / Prometheus / Grafana
 ```
 
 ---
@@ -275,7 +286,7 @@ from llm_calls group by prompt_id, model order by prompt_id, model;
 }
 ```
 
-- `code`：错误码枚举名（`INVALID_REQUEST` / `UNAUTHORIZED` / `FORBIDDEN` / `NOT_FOUND` / `METHOD_NOT_ALLOWED` / `CONFLICT` / `PAYLOAD_TOO_LARGE` / `QUEUE_FULL` / `INTERNAL_ERROR`），仅作粗分类，精确语义以 HTTP 状态码为准。
+- `code`：错误码枚举名（`INVALID_REQUEST` / `UNAUTHORIZED` / `FORBIDDEN` / `NOT_FOUND` / `METHOD_NOT_ALLOWED` / `CONFLICT` / `PAYLOAD_TOO_LARGE` / `INTERNAL_ERROR`），仅作粗分类，精确语义以 HTTP 状态码为准（例如队列不可用返回 `503`，`code` 落到 `INTERNAL_ERROR`）。
 - `message`：面向用户的中文文案，前端直接展示。
 - `traceId`：32 位十六进制追踪号。请求可携带 `X-Trace-Id`（`[A-Za-z0-9-]`，1-64 位）透传，否则由服务端生成；结果会回写到响应头 `X-Trace-Id`（成功响应也带）。
 
@@ -309,11 +320,13 @@ from llm_calls group by prompt_id, model order by prompt_id, model;
 | 输出结构失败 | `workbench.llm.output_failures`    | `workbench_llm_output_failures_total`      | 模型输出不可用（空内容 / 非法 JSON / 不符合 schema）的次数，即结构失败率 | `operation`、`reason=empty_content/invalid_json/schema_violation` | `LlmClient.callOnce`               |
 | 校验拦截次数 | `workbench.llm.validation_failures` | `workbench_llm_validation_failures_total` | 结果校验拦下未通过模型输出的次数（反幻觉闸门命中）             | `reason=quote_mismatch` / `quote_missing` / `invalid_chapter_*` 等 | `TaskService.generateContent`      |
 | token 用量   | `workbench.llm.tokens`             | `workbench_llm_tokens_total`               | 从 LLM 响应 `usage` 字段累加的 token 数（同时落库到 `llm_calls`，见「提示词版本化与成本核算」） | `type=prompt/completion`、`model`          | `LlmClient.recordUsage`            |
-| 队列深度     | `workbench.queue.depth`            | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge）                               | 无                                         | `TaskService` 构造函数绑定         |
-| 队列等待时长 | `workbench.queue.wait`             | `workbench_queue_wait_seconds`             | 任务从入队到真正开始执行的等待时长直方图                        | 无                                         | `TaskService.tryEnqueue`           |
+| 队列深度     | `workbench.queue.depth`            | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge），读自 broker 的真实积压量；broker 不可达时为 `-1` | 无                                         | `RabbitTaskQueue` 构造函数绑定     |
+| 队列等待时长 | `workbench.queue.wait`             | `workbench_queue_wait_seconds`             | 任务从入队到真正开始执行的等待时长直方图（取消息 `timestamp`）  | 无                                         | `TaskQueueConsumer.handle`         |
+| 投递失败次数 | `workbench.queue.publish_failures` | `workbench_queue_publish_failures_total`   | broker 确认（publisher confirm）未成功返回的次数                | 无                                         | `RabbitTaskQueue.publish`          |
 
 - **usage 解析**：`LlmClient` 原实现只取 `choices[0].message.content`，**并不解析 `usage`**；先前补上 `usage.prompt_tokens` / `usage.completion_tokens` 的读取并累加到指标，现在同一处还会按「任务 + 提示词版本 + 实际模型」写进 `llm_calls` 表，用于单视频成本导出。
-- **队列指标的可替换性**：`WorkbenchMetrics.bindQueueDepth(Supplier<Number>)` 由 `TaskService` 注入数据源（当前是有界单线程队列的等待任务数）。P2-1 把进程内队列换成 RabbitMQ 时，只改这一处绑定与调用点，指标名与语义保持不变。
+- **队列深度来自 broker**：`WorkbenchMetrics.bindQueueDepth(Supplier<Number>)` 由 `RabbitTaskQueue` 注入数据源，用 `AmqpAdmin.getQueueProperties` 被动读取队列积压量。读不到时返回 `-1`（并在状态翻转时打一条 WARN），而不是回落成 `0`——把「broker 不可达」伪装成「队列为空」会让人误判系统健康。
+- **投递失败只打点与记日志**：`publish` 抛异常时任务保持 `QUEUED` 并把错误提示交回调用方（导入接口返回 503，任务仍在），异步拒收（broker 收下了但未确认）只计 `workbench.queue.publish_failures` 并记 ERROR 日志，**不自动重投**，依赖服务启动时的恢复重投兜底（这个取舍在 README 限制里如实标明）。
 
 ### 启动与看图
 
@@ -373,7 +386,7 @@ Compose 默认将容器 MySQL 映射到宿主机 `3307`，避免与其他项目�
 
 MySQL 用户和密码只会在空数据卷首次初始化时创建。如果已有旧卷是用其他账号初始化的，请先备份数据，再执行 `docker compose down --volumes` 后重新初始化，或进入 MySQL 手动创建 `.env` 中的 `MYSQL_USER` 并授权；不要为了测试随意删除包含重要视频/数据库的卷。
 
-工作台访问 `http://localhost:5174`，后端访问 `http://localhost:8081`，Prometheus 访问 `http://localhost:9090`，Grafana 访问 `http://localhost:3000`。Compose 会启动 Nginx 前端、Spring Boot 后端、MySQL 8.4 以及 Prometheus / Grafana 可观测性栈；Windows 上的 Whisper worker 由 `start-all.ps1` 在宿主机运行，使 PyTorch 能直接使用宿主机 NVIDIA GPU。音视频保存在 `video-storage` 命名卷，MySQL 数据保存在 `mysql-data` 命名卷，Prometheus / Grafana 数据分别保存在 `prometheus-data`、`grafana-data` 命名卷；模型缓存在 `WHISPER_MODEL_DIR` 指定的宿主机目录。端口可通过 `BACKEND_HOST_PORT`、`FRONTEND_HOST_PORT`、`PROMETHEUS_HOST_PORT` 和 `GRAFANA_HOST_PORT` 修改。
+工作台访问 `http://localhost:5174`，后端访问 `http://localhost:8081`，Prometheus 访问 `http://localhost:9090`，Grafana 访问 `http://localhost:3000`，RabbitMQ 管理台访问 `http://localhost:15672`。Compose 会启动 Nginx 前端、Spring Boot 后端、MySQL 8.4、RabbitMQ 4 以及 Prometheus / Grafana 可观测性栈；Windows 上的 Whisper worker 由 `start-all.ps1` 在宿主机运行，使 PyTorch 能直接使用宿主机 NVIDIA GPU。音视频保存在 `video-storage` 命名卷，MySQL 数据保存在 `mysql-data` 命名卷，队列消息保存在 `rabbitmq-data` 命名卷，Prometheus / Grafana 数据分别保存在 `prometheus-data`、`grafana-data` 命名卷；模型缓存在 `WHISPER_MODEL_DIR` 指定的宿主机目录。端口可通过 `BACKEND_HOST_PORT`、`FRONTEND_HOST_PORT`、`PROMETHEUS_HOST_PORT`、`GRAFANA_HOST_PORT`、`RABBITMQ_HOST_PORT` 和 `RABBITMQ_MANAGEMENT_HOST_PORT` 修改。
 
 停止容器但保留视频、模型和数据库：
 
@@ -399,7 +412,7 @@ docker builder prune -f
 ### 环境要求
 
 - Java 21、Node.js 20+、Python 3.11+
-- MySQL 8.0+
+- MySQL 8.0+、RabbitMQ 4（或直接用 `compose.yaml` 起这两个依赖）
 - FFmpeg（需在 `PATH` 中，或通过 `FFMPEG_PATH` 指定）
 - 本地 Whisper：`pip install openai-whisper`
 
@@ -456,6 +469,12 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | `WORKBENCH_STORAGE_DIR`             | `./storage`                        | 视频、音频与模型文件的本机存放目录                 |
 | `WORKBENCH_MAX_UPLOAD_BYTES`        | 20GB                               | 单个视频大小上限                                   |
 | `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 180                                | 外部进程超时时间；首次下载模型时应保留充足时间     |
+| `RABBITMQ_HOST`                     | `localhost`                        | 消息队列地址（compose 内为服务名 `rabbitmq`）      |
+| `RABBITMQ_PORT`                     | 5672                               | 消息队列端口                                       |
+| `RABBITMQ_HOST_PORT`                | 5672                               | RabbitMQ 映射到宿主机的 AMQP 端口                  |
+| `RABBITMQ_MANAGEMENT_HOST_PORT`     | 15672                              | RabbitMQ 管理台映射到宿主机的端口                  |
+| `RABBITMQ_USERNAME`                 | `workbench`                        | RabbitMQ 账号（compose 首次初始化时创建）          |
+| `RABBITMQ_PASSWORD`                 | 无（compose 必填）                 | RabbitMQ 密码                                      |
 | `FFMPEG_PATH`                       | `ffmpeg`                           | FFmpeg 可执行文件路径                              |
 | `WHISPER_MODEL`                     | `turbo`                            | Whisper 模型规格                                   |
 | `WHISPER_SERVICE_URL`               | `http://host.docker.internal:8090` | 宿主机 Whisper 服务地址                            |
@@ -506,6 +525,21 @@ Prometheus 目标 `video-workbench-backend` 为 `up`，Grafana 面板与数据�
 临时注入**占位**单价 `deepseek-v4-flash:0.28:0.42`（仅为验证折算算术，不是任何官方报价）后金额为
 `0.010300` = `0.002993`（摘要）+ `0.007307`（翻译），可由 token 数手工复核。后端 `mvnw verify` 通过：
 `Tests run: 98, Failures: 0, Errors: 0, Skipped: 3`（3 项 MySQL 集成测试未配置 `MYSQL_TEST_URL` 时跳过），Spotless 通过。
+
+任务队列外置到 RabbitMQ 后按计划的两条验收标准在容器环境实测：
+
+- **重复投递只被消费一次**：把一条已完成任务在库里改回 `QUEUED/IMPORT`，在 **backend 停机期间**通过 RabbitMQ 管理 API
+  `POST /api/exchanges/%2F/amq.default/publish` 向 `workbench.tasks` 直投 **3 条内容相同**的消息；
+  启动后端后日志出现 **3 次**「任务已被领取或已结束，跳过重复投递」，加上启动恢复自己重投的 1 条共 4 条消息，
+  该任务只被执行 1 次并最终 `COMPLETED`——重复投递与恢复重投都没有造成重复处理。
+- **重启后任务不丢**：上面 3 条消息是在后端进程停止期间投递的，broker 持久化保存，后端重启后被正常消费，
+  证明进程重启不会丢失已入队的任务。队列拓扑为 `workbench.tasks`（durable，1 个消费者）/ `workbench.tasks.retry` / `workbench.tasks.dead` 三个持久化队列。
+- **长任务不被 broker 掐断**：RabbitMQ 默认 `consumer_timeout` 为 30 分钟，短于 `WORKBENCH_PROCESS_TIMEOUT_MINUTES=180`，
+  长视频处理中会被强制关闭 channel；容器已通过 `RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS` 放宽到 24 小时，
+  实测 `rabbitmqctl eval 'application:get_env(rabbit, consumer_timeout).'` 返回 `{ok,86400000}`。
+- 指标侧：`workbench_queue_depth 0.0`（读自 broker 真实积压量）、`workbench_queue_wait_seconds_count 1`（正常上传路径记录到一次等待时长）、
+  `workbench_queue_publish_failures_total` 未出现（本次没有投递失败）。后端 `mvnw verify` 通过：
+  `Tests run: 108, Failures: 0, Errors: 0, Skipped: 3`，Spotless 通过。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 
 ---
 

@@ -24,6 +24,11 @@ services:
       # 模型单价只影响成本折算，未配置时导出成本为 null（token 用量照常统计）。
       LLM_PRICES: ${LLM_PRICES:-}
       LLM_PRICE_CURRENCY: ${LLM_PRICE_CURRENCY:-USD}
+      # 任务队列：任务是先落库为 QUEUED 再投递消息，队列与消息都持久化，进程重启不丢任务。
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-workbench}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?请在 .env 中设置 RABBITMQ_PASSWORD}
     ports:
       - "${BACKEND_HOST_PORT:-8081}:8080"
     extra_hosts:
@@ -32,6 +37,8 @@ services:
       - video-storage:/app/storage
     depends_on:
       mysql:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:8080/actuator/health']
@@ -95,6 +102,27 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  rabbitmq:
+    image: rabbitmq:4.0-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-workbench}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?请在 .env 中设置 RABBITMQ_PASSWORD}
+      # 单个视频可能处理很久（转写 + 内容生成），而 RabbitMQ 默认 30 分钟收不到 ack 就会强制关闭 channel。
+      # 采用「处理完再 ack」的至少一次语义，就必须把 consumer_timeout 放宽，否则长任务会被 broker 反复打断。
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '-rabbit consumer_timeout 86400000'
+    ports:
+      - "${RABBITMQ_HOST_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_HOST_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
   mysql:
     image: mysql:8.4
     environment:
@@ -125,3 +153,4 @@ volumes:
   mysql-data:
   prometheus-data:
   grafana-data:
+  rabbitmq-data:
