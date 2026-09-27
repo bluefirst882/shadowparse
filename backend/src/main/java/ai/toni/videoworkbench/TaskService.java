@@ -329,17 +329,23 @@ class TaskService {
     try {
       tasks.update(id, TaskStatus.PROCESSING, TaskStage.SUMMARY, 85, null);
       // 云端模型输出不稳定，校验不通过时自动重新生成，最多 SUMMARY_ATTEMPTS 次。
+      // 重试时把上一次的失败原因回灌提示词：同一个提示词重试大概率仍产出同样的幻觉，带上原因才有意义。
       TaskResult result = null;
       Exception failure = null;
       for (int attempt = 0; attempt < SUMMARY_ATTEMPTS && result == null; attempt++) {
         if (attempt > 0) metrics.recordLlmRetry("summarize");
         try {
-          TaskResult candidate = llm.summarize(transcript, summaryMaxInputChars);
+          TaskResult candidate =
+              llm.summarize(
+                  transcript, summaryMaxInputChars, failure == null ? null : failure.getMessage());
           checkCancelled(id);
           resultValidator.validate(candidate, transcript);
           result = candidate;
         } catch (Cancelled ex) {
           throw ex;
+        } catch (ResultValidator.Failure ex) {
+          metrics.recordLlmValidationFailure(ex.reason());
+          failure = ex;
         } catch (Exception ex) {
           failure = ex;
         }

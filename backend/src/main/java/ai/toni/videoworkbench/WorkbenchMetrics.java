@@ -21,6 +21,7 @@ class WorkbenchMetrics {
   static final String TRANSCRIPTION_DURATION = "workbench.transcription.duration";
   static final String LLM_REQUESTS = "workbench.llm.requests";
   static final String LLM_RETRIES = "workbench.llm.retries";
+  static final String LLM_VALIDATION_FAILURES = "workbench.llm.validation_failures";
   static final String LLM_TOKENS = "workbench.llm.tokens";
   static final String QUEUE_DEPTH = "workbench.queue.depth";
   static final String QUEUE_WAIT = "workbench.queue.wait";
@@ -51,6 +52,15 @@ class WorkbenchMetrics {
   /** 摘要生成在单次任务内的重试次数（首次之外的每次尝试）。 */
   void recordLlmRetry(String operation) {
     registry.counter(LLM_RETRIES, "operation", operation).increment();
+  }
+
+  /**
+   * 结果校验拦下一次未通过的模型输出，{@code reason} 取校验失败分类（如 quote_mismatch）。
+   *
+   * <p>用于观测「反幻觉闸门到底拦住了几次」，标签只取有限枚举值，避免高基数。
+   */
+  void recordLlmValidationFailure(String reason) {
+    registry.counter(LLM_VALIDATION_FAILURES, "reason", reason).increment();
   }
 
   /** 从 LLM 响应 usage 字段累加 token 用量，{@code type} 取 prompt / completion。 */

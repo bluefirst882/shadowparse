@@ -86,6 +86,28 @@ class WorkbenchMetricsTest {
   }
 
   @Test
+  void recordsLlmValidationFailuresByReason() {
+    metrics.recordLlmValidationFailure("quote_mismatch");
+    metrics.recordLlmValidationFailure("quote_mismatch");
+    metrics.recordLlmValidationFailure("invalid_chapter_timing");
+
+    assertEquals(
+        2,
+        registry
+            .get(WorkbenchMetrics.LLM_VALIDATION_FAILURES)
+            .tag("reason", "quote_mismatch")
+            .counter()
+            .count());
+    assertEquals(
+        1,
+        registry
+            .get(WorkbenchMetrics.LLM_VALIDATION_FAILURES)
+            .tag("reason", "invalid_chapter_timing")
+            .counter()
+            .count());
+  }
+
+  @Test
   void accumulatesPromptAndCompletionTokensPerModel() {
     metrics.recordLlmTokens("deepseek-v4-flash", 100, 40);
     metrics.recordLlmTokens("deepseek-v4-flash", 20, 10);
@@ -134,6 +156,7 @@ class WorkbenchMetricsTest {
     prometheusMetrics.recordTranscription(Duration.ofSeconds(1), true);
     prometheusMetrics.recordLlmCall("summarize", true);
     prometheusMetrics.recordLlmRetry("summarize");
+    prometheusMetrics.recordLlmValidationFailure("quote_mismatch");
     prometheusMetrics.recordLlmTokens("deepseek-v4-flash", 10, 5);
     prometheusMetrics.bindQueueDepth(() -> 1);
     prometheusMetrics.recordQueueWait(Duration.ofMillis(10));
@@ -145,6 +168,7 @@ class WorkbenchMetricsTest {
           "workbench_transcription_duration_seconds_bucket",
           "workbench_llm_requests_total",
           "workbench_llm_retries_total",
+          "workbench_llm_validation_failures_total",
           "workbench_llm_tokens_total",
           "workbench_queue_depth",
           "workbench_queue_wait_seconds_count"

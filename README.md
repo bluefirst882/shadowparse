@@ -13,7 +13,7 @@
 
 - 设计 `IMPORT → AUDIO_EXTRACTION → TRANSCRIPTION → SUMMARY → COMPLETED` 分阶段任务流程，使用 MySQL 持久化任务状态和转写片段，使处理进度、失败信息和已有产物可被查询。
 - 使用 `ProcessBuilder` 托管 FFmpeg，异步消费 stdout/stderr，并加入超时终止和退出码诊断，避免外部进程因管道缓冲区写满而阻塞；Whisper 改为常驻 HTTP 服务单独托管。
-- 对 LLM 返回的摘要、要点和章节执行服务端业务校验，检查章节来源片段、时间范围、顺序和重叠，避免直接信任模型生成的时间轴。
+- 对 LLM 返回的摘要、要点和章节执行服务端业务校验，检查章节来源片段、时间范围、顺序与重叠，并用「引文逐字出自来源片段」的反幻觉闸门（`quote`）拦截编造内容，避免直接信任模型的输出。
 - 在 2 个真实视频样本上完成本地转写验证：英文样本完整转写持久化 42 个带时间戳片段；中文样本（355.947 秒）持久化 250 个带时间戳片段，实测从上传到完成约 58 秒。英文样本的 Range 请求返回 `206 Partial Content`，Markdown、JSON、SRT 三种导出均成功。
 
 上述耗时和片段数是样本结果，不代表通用准确率或并发性能；中文样本还发现 Whisper 尾部输出存在超出媒体时长的片段，当前记录为待进一步收敛的验证发现。
@@ -25,7 +25,7 @@
 ```
 视频导入 → FFmpeg 音频抽取 → Whisper 语音转写 → 自动生成摘要/章节 → 结果校验 → 多格式导出
               │                    │                    │                │
-          16kHz 单声道        turbo 模型（GPU）     JSON 结构化输出   章节时间轴校验
+          16kHz 单声道        turbo 模型（GPU）     JSON 结构化输出   章节时间轴 + 引文校验
 ```
 
 ---
@@ -94,15 +94,19 @@ Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.
 
 ### 3. LLM 结构化输出与可信校验
 
-大模型的输出不可全信，尤其是时间轴。因此：
+大模型的输出不可全信，尤其是时间轴，以及「看起来像原文」的引文。因此：
 
-- 约束模型返回 JSON：`{summary, keyPoints[], chapters[{startMs, endMs, title, sourceSegmentId, sourceEndSegmentId}]}`。章节可覆盖连续转写片段，首尾片段 ID 用于服务端时间范围校验。
+- 约束模型返回 JSON：`{summary, keyPoints[], chapters[{startMs, endMs, title, sourceSegmentId, sourceEndSegmentId, quote}]}`。章节可覆盖连续转写片段，首尾片段 ID 用于服务端时间范围校验；`quote` 是该章节所引用片段的**转写原文原句**。
 - 每个章节**必须声明其起始和结束来源转写片段 id**；单片段章节的两个 id 相同
-- 服务端逐条校验：章节时间必须分别落在首、尾来源片段的起止范围内，尾片段不得早于首片段，章节时间不得与上一章节重叠、标题非空
-- 校验失败则整体失败并可重试，**本地转写结果始终保留**
+- 服务端逐条校验：
+  - **时间轴**：章节时间必须分别落在首、尾来源片段的起止范围内，尾片段不得早于首片段，章节时间不得与上一章节重叠、标题非空
+  - **反幻觉闸门（quote）**：`quote` 非空，且**归一化后**（去掉空白与中英文标点）必须连续出现在 `sourceSegmentId..sourceEndSegmentId` 覆盖片段的转写原文里；不匹配即判定为模型编造，抛错并触发重试。比较的是完整引文的连续包含，不做前缀 / 关键字 / 编辑距离等宽松匹配
+- **分块与合并**：转写按 `LLM_MAX_INPUT_CHARS` 分批。**分块数 > 1 时**，summary 与 keyPoints 额外发起一次「合并去重」调用（要求模型只返回 `{summary,keyPoints[]}`）；chapters 由各块结果**确定性合并排序**，不交给模型重写，以免破坏 `sourceSegmentId` 引用与时间校验。
+- **要点不截断**：keyPoints 按「去首尾空白 + 去尾部标点」归一化后去重；数量超过 12 条（继承自旧截断值的宽松告警阈值）只打日志告警，**绝不静默丢弃**。
+- 校验失败则整体失败并可重试，且**把上一次的失败原因回灌到提示词**（同一个提示词重试大概率仍是同样的幻觉，带上原因才有意义），最多 3 次；**本地转写结果始终保留**。
 - 非中文视频在转写后自动生成中文译文，便于与摘要对照阅读
 
-这样既获得了大模型的表达能力，又不把时间轴的正确性交给模型。
+这样既获得了大模型的表达能力，又不把时间轴与引文的正确性交给模型。
 
 ### 4. 视频流式播放
 
@@ -243,6 +247,7 @@ Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.
 | 转写耗时     | `workbench.transcription.duration` | `workbench_transcription_duration_seconds` | 单条任务 Whisper 转写（含片段落库）耗时直方图                   | `outcome=success/failure`                  | `TaskService.transcribe`           |
 | LLM 调用结果 | `workbench.llm.requests`           | `workbench_llm_requests_total`             | 每次 LLM HTTP 调用按结果计数                                    | `operation=summarize/translate`、`outcome` | `LlmClient.send`（`finally` 记账） |
 | LLM 重试次数 | `workbench.llm.retries`            | `workbench_llm_retries_total`              | 摘要生成在单条任务内首次之外的重试次数（最多 3 次尝试）         | `operation`                                | `TaskService.generateContent`      |
+| 校验拦截次数 | `workbench.llm.validation_failures` | `workbench_llm_validation_failures_total` | 结果校验拦下未通过模型输出的次数（反幻觉闸门命中）             | `reason=quote_mismatch` / `quote_missing` / `invalid_chapter_*` 等 | `TaskService.generateContent`      |
 | token 用量   | `workbench.llm.tokens`             | `workbench_llm_tokens_total`               | 从 LLM 响应 `usage` 字段累加的 token 数（仅运行指标，未持久化） | `type=prompt/completion`、`model`          | `LlmClient.recordUsage`            |
 | 队列深度     | `workbench.queue.depth`            | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge）                               | 无                                         | `TaskService` 构造函数绑定         |
 | 队列等待时长 | `workbench.queue.wait`             | `workbench_queue_wait_seconds`             | 任务从入队到真正开始执行的等待时长直方图                        | 无                                         | `TaskService.tryEnqueue`           |
@@ -259,7 +264,7 @@ docker compose up -d --wait      # backend / frontend / mysql / prometheus / gra
 - Prometheus：<http://localhost:9090>，抓取任务 `video-workbench-backend`，目标 `backend:8080/actuator/prometheus`（容器网络内，无需令牌）。
 - Grafana：<http://localhost:3000>，默认账号 `admin` / `workbench`（可用 `GRAFANA_ADMIN_USER`、`GRAFANA_ADMIN_PASSWORD` 覆盖）。数据源与面板均由 `ops/grafana/provisioning` 自动配置，面板 UID 为 `workbench-observability`。
 
-面板覆盖上述五类指标：LLM 调用成功/失败/重试计数、转写完成次数与平均耗时、当前队列深度，以及 token 用量、LLM 调用次数、转写耗时 P50/P95、队列等待时长四条曲线。
+面板覆盖上述主要指标：LLM 调用成功/失败/重试计数、转写完成次数与平均耗时、当前队列深度，以及 token 用量、LLM 调用次数、转写耗时 P50/P95、队列等待时长四条曲线（新增的校验拦截计数尚未加入面板，可在 Prometheus 直接查询）。
 
 ![可观测性面板](docs/可观测性面板.png)
 
@@ -424,7 +429,7 @@ MySQL 8.4 隔离容器中 Flyway 迁移执行，以及 1 个真实视频的完�
 中文真实视频已补充：输入 `E:\Downloads\Video\27210678708-1-192.mp4`，媒体时长 355.947 秒，H.264/AAC；本地 Whisper `turbo`、RTX 4060 Laptop GPU，上传到任务完成约 58 秒，持久化 250 个片段，任务保留为 `COMPLETED/SUMMARY` 并提示摘要可单独重试。检查发现尾部若干片段超出媒体时长，未将该样本表述为时间轴校验通过。以上数据仅对应样本，不能外推为通用成功率或准确率。
 
 可观测性已在容器环境实测：`docker compose build backend` + `docker compose up -d --wait` 后五个服务全部 healthy；
-对 `demo` 的已有任务触发 `retranscribe` / `retry`，`/actuator/prometheus` 出现五类自定义指标的非零样本
+对 `demo` 的已有任务触发 `retranscribe` / `retry`，`/actuator/prometheus` 出现自定义指标的非零样本
 （转写耗时 `count=2`、LLM 调用成功、token `prompt=12690 / completion=29117`、队列深度抓取到 `2`、队列等待时长有样本），
 Prometheus 目标 `video-workbench-backend` 为 `up`，Grafana 面板与数据源由 provisioning 自动加载；
 额外用一次故障注入（临时失效 `LLM_API_KEY`）验证了 LLM 失败与重试路径。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。

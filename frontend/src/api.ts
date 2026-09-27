@@ -23,6 +23,8 @@ export type Chapter = {
   title: string
   sourceSegmentId: number
   sourceEndSegmentId?: number
+  // quote 为该章节引用的转写原文原句，服务端已核验其逐字出自来源片段。
+  quote: string
 }
 export type Details = {
   task: Task

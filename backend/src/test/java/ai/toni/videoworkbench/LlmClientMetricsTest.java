@@ -33,7 +33,7 @@ class LlmClientMetricsTest {
   void recordsTokensAndSuccessFromUsageField() throws Exception {
     LlmClient client = clientFor(200, successResponse(123, 45));
 
-    client.summarize(List.of(new TranscriptSegment(1, 0, 1000, "你好", null)), 60000);
+    client.summarize(List.of(new TranscriptSegment(1, 0, 1000, "你好", null)), 60000, null);
 
     assertEquals(
         123,
@@ -64,7 +64,8 @@ class LlmClientMetricsTest {
 
     assertThrows(
         IllegalStateException.class,
-        () -> client.summarize(List.of(new TranscriptSegment(1, 0, 1000, "你好", null)), 60000));
+        () ->
+            client.summarize(List.of(new TranscriptSegment(1, 0, 1000, "你好", null)), 60000, null));
 
     assertEquals(
         1,

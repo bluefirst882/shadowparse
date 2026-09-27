@@ -303,6 +303,15 @@ small {
   display: block;
   margin-top: 4px;
 }
+.chapter-quote {
+  display: block;
+  margin-top: 4px;
+  color: #5b6b7a;
+  font-style: italic;
+}
+.dark .chapter-quote {
+  color: #9fb0bd;
+}
 .panel-title {
   display: flex;
   align-items: center;

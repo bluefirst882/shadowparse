@@ -485,7 +485,7 @@ onUnmounted(stopPolling)
                   "
                   >-#{{ chapter.sourceEndSegmentId }}</template
                 ></small
-              >
+              ><span class="chapter-quote">“{{ chapter.quote }}”</span>
             </button>
           </aside>
         </section>
