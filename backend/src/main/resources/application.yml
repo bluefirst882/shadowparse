@@ -36,5 +36,6 @@ workbench:
     base-url: ${LLM_BASE_URL:https://api.deepseek.com/v1}
     api-key: ${LLM_API_KEY:}
     model: ${LLM_MODEL:deepseek-v4-flash}
+    fallback-model: ${LLM_FALLBACK_MODEL:deepseek-v4-pro}
     reasoning-effort: ${LLM_REASONING_EFFORT:low}
     max-input-chars: ${LLM_MAX_INPUT_CHARS:60000}

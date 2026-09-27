@@ -97,6 +97,9 @@ Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.
 大模型的输出不可全信，尤其是时间轴，以及「看起来像原文」的引文。因此：
 
 - 约束模型返回 JSON：`{summary, keyPoints[], chapters[{startMs, endMs, title, sourceSegmentId, sourceEndSegmentId, quote}]}`。章节可覆盖连续转写片段，首尾片段 ID 用于服务端时间范围校验；`quote` 是该章节所引用片段的**转写原文原句**。
+- **JSON Schema 单一来源**：三种响应（摘要、跨块合并、翻译）的 schema 都定义在 `LlmJsonSchema`，同一份 schema 原文既**写进提示词**约束模型，也用于**服务端本地机械校验**，不会出现「提示词说的」与「校验查的」两张皮。本地校验按 `$..` JSON 路径逐条报出「缺少必填字段」「期望 string，实际为 number」，而不是只判断顶层字段是不是 `null`。
+- **供应商能力是实测出来的，不是假设的**：DeepSeek 官方 API 目前**不支持**原生结构化输出——实测 `response_format={"type":"json_schema",...}` 返回 `400 This response_format type is unavailable now`，强制 function calling（`tool_choice`）返回 `400 Thinking mode does not support this tool_choice`，只有 `response_format={"type":"json_object"}` 返回 200。因此这里采用「`json_object` 保证一定是合法 JSON + 提示词内 schema 原文 + 本地 schema 校验」的组合，并把空内容、非法 JSON、结构不符三类都计入 `workbench.llm.output_failures` 指标，失败率可直接从指标读出。
+- **模型降级链**：主模型（`LLM_MODEL`，默认 `deepseek-v4-flash`）在**超时、HTTP 报错或输出结构不可用**时，自动升级到备用模型（`LLM_FALLBACK_MODEL`，默认 `deepseek-v4-pro`）重试一次，降级按原因打点 `workbench.llm.fallbacks` 并记 WARN 日志（含模型名与原因），可用 `LLM_FALLBACK_MODEL=` 关闭。主模型失败与备用模型成功的调用**分别记账**，成功率不会被降级掩盖。
 - 每个章节**必须声明其起始和结束来源转写片段 id**；单片段章节的两个 id 相同
 - 服务端逐条校验：
   - **时间轴**：章节时间必须分别落在首、尾来源片段的起止范围内，尾片段不得早于首片段，章节时间不得与上一章节重叠、标题非空
@@ -247,6 +250,8 @@ Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.
 | 转写耗时     | `workbench.transcription.duration` | `workbench_transcription_duration_seconds` | 单条任务 Whisper 转写（含片段落库）耗时直方图                   | `outcome=success/failure`                  | `TaskService.transcribe`           |
 | LLM 调用结果 | `workbench.llm.requests`           | `workbench_llm_requests_total`             | 每次 LLM HTTP 调用按结果计数                                    | `operation=summarize/translate`、`outcome` | `LlmClient.send`（`finally` 记账） |
 | LLM 重试次数 | `workbench.llm.retries`            | `workbench_llm_retries_total`              | 摘要生成在单条任务内首次之外的重试次数（最多 3 次尝试）         | `operation`                                | `TaskService.generateContent`      |
+| 模型降级次数 | `workbench.llm.fallbacks`          | `workbench_llm_fallbacks_total`            | 主模型失败后升级到备用模型的次数                                | `operation`、`reason=http_400/timeout/io_error/schema_violation/empty_content/invalid_json` | `LlmClient.requestJson`            |
+| 输出结构失败 | `workbench.llm.output_failures`    | `workbench_llm_output_failures_total`      | 模型输出不可用（空内容 / 非法 JSON / 不符合 schema）的次数，即结构失败率 | `operation`、`reason=empty_content/invalid_json/schema_violation` | `LlmClient.callOnce`               |
 | 校验拦截次数 | `workbench.llm.validation_failures` | `workbench_llm_validation_failures_total` | 结果校验拦下未通过模型输出的次数（反幻觉闸门命中）             | `reason=quote_mismatch` / `quote_missing` / `invalid_chapter_*` 等 | `TaskService.generateContent`      |
 | token 用量   | `workbench.llm.tokens`             | `workbench_llm_tokens_total`               | 从 LLM 响应 `usage` 字段累加的 token 数（仅运行指标，未持久化） | `type=prompt/completion`、`model`          | `LlmClient.recordUsage`            |
 | 队列深度     | `workbench.queue.depth`            | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge）                               | 无                                         | `TaskService` 构造函数绑定         |
@@ -264,7 +269,7 @@ docker compose up -d --wait      # backend / frontend / mysql / prometheus / gra
 - Prometheus：<http://localhost:9090>，抓取任务 `video-workbench-backend`，目标 `backend:8080/actuator/prometheus`（容器网络内，无需令牌）。
 - Grafana：<http://localhost:3000>，默认账号 `admin` / `workbench`（可用 `GRAFANA_ADMIN_USER`、`GRAFANA_ADMIN_PASSWORD` 覆盖）。数据源与面板均由 `ops/grafana/provisioning` 自动配置，面板 UID 为 `workbench-observability`。
 
-面板覆盖上述主要指标：LLM 调用成功/失败/重试计数、转写完成次数与平均耗时、当前队列深度，以及 token 用量、LLM 调用次数、转写耗时 P50/P95、队列等待时长四条曲线（新增的校验拦截计数尚未加入面板，可在 Prometheus 直接查询）。
+面板覆盖上述主要指标：LLM 调用成功/失败/重试计数、转写完成次数与平均耗时、当前队列深度，以及 token 用量、LLM 调用次数、转写耗时 P50/P95、队列等待时长四条曲线（较晚加入的「校验拦截」「模型降级」「输出结构失败」三个计数器尚未画进面板，可在 Prometheus 直接查询）。
 
 ![可观测性面板](docs/可观测性面板.png)
 
@@ -401,6 +406,8 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | `WORKBENCH_JWT_SECRET`              | 无（必填）                         | JWT 签名密钥，至少 32 字符，需自行随机生成         |
 | `WORKBENCH_TOKEN_TTL_HOURS`         | 24                                 | 令牌有效期（小时）                                 |
 | `LLM_API_KEY`                       | 空                                 | 云端 LLM 密钥，留空则跳过摘要阶段                  |
+| `LLM_MODEL`                         | `deepseek-v4-flash`                | 主模型                                             |
+| `LLM_FALLBACK_MODEL`                | `deepseek-v4-pro`                  | 主模型失败/超时/结构不可用时升级到的备用模型，留空即关闭降级 |
 | `LLM_MAX_INPUT_CHARS`               | 60000                              | 单次摘要请求的字符上限，按完整转写片段分批         |
 | `PROMETHEUS_HOST_PORT`              | 9090                               | Prometheus 映射到宿主机的端口                      |
 | `GRAFANA_HOST_PORT`                 | 3000                               | Grafana 映射到宿主机的端口                         |

@@ -21,6 +21,8 @@ class WorkbenchMetrics {
   static final String TRANSCRIPTION_DURATION = "workbench.transcription.duration";
   static final String LLM_REQUESTS = "workbench.llm.requests";
   static final String LLM_RETRIES = "workbench.llm.retries";
+  static final String LLM_FALLBACKS = "workbench.llm.fallbacks";
+  static final String LLM_OUTPUT_FAILURES = "workbench.llm.output_failures";
   static final String LLM_VALIDATION_FAILURES = "workbench.llm.validation_failures";
   static final String LLM_TOKENS = "workbench.llm.tokens";
   static final String QUEUE_DEPTH = "workbench.queue.depth";
@@ -61,6 +63,23 @@ class WorkbenchMetrics {
    */
   void recordLlmValidationFailure(String reason) {
     registry.counter(LLM_VALIDATION_FAILURES, "reason", reason).increment();
+  }
+
+  /**
+   * 主模型调用失败后按降级链换用备用模型的次数，{@code reason} 取降级原因（http_400 / timeout / io_error / schema_violation /
+   * empty_content / invalid_json）。
+   */
+  void recordLlmFallback(String operation, String reason) {
+    registry.counter(LLM_FALLBACKS, "operation", operation, "reason", reason).increment();
+  }
+
+  /**
+   * 模型输出不可用的次数，{@code reason} 取 empty_content / invalid_json / schema_violation。
+   *
+   * <p>这就是「解析失败率」：与 {@link #recordLlmCall} 的调用次数相除，可算出结构化输出的失败比例。
+   */
+  void recordLlmOutputFailure(String operation, String reason) {
+    registry.counter(LLM_OUTPUT_FAILURES, "operation", operation, "reason", reason).increment();
   }
 
   /** 从 LLM 响应 usage 字段累加 token 用量，{@code type} 取 prompt / completion。 */

@@ -113,6 +113,7 @@ class LlmClientSummaryTest {
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         "test-model",
+        "",
         "low");
   }
 

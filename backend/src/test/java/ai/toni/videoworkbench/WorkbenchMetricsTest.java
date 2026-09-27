@@ -108,6 +108,44 @@ class WorkbenchMetricsTest {
   }
 
   @Test
+  void recordsFallbacksAndStructuredOutputFailuresByReason() {
+    metrics.recordLlmFallback("summarize", "http_400");
+    metrics.recordLlmFallback("summarize", "http_400");
+    metrics.recordLlmFallback("summarize", "schema_violation");
+    metrics.recordLlmOutputFailure("summarize", "schema_violation");
+    metrics.recordLlmOutputFailure("translate", "invalid_json");
+
+    assertEquals(
+        2,
+        registry
+            .get(WorkbenchMetrics.LLM_FALLBACKS)
+            .tags("operation", "summarize", "reason", "http_400")
+            .counter()
+            .count());
+    assertEquals(
+        1,
+        registry
+            .get(WorkbenchMetrics.LLM_FALLBACKS)
+            .tags("operation", "summarize", "reason", "schema_violation")
+            .counter()
+            .count());
+    assertEquals(
+        1,
+        registry
+            .get(WorkbenchMetrics.LLM_OUTPUT_FAILURES)
+            .tags("operation", "summarize", "reason", "schema_violation")
+            .counter()
+            .count());
+    assertEquals(
+        1,
+        registry
+            .get(WorkbenchMetrics.LLM_OUTPUT_FAILURES)
+            .tags("operation", "translate", "reason", "invalid_json")
+            .counter()
+            .count());
+  }
+
+  @Test
   void accumulatesPromptAndCompletionTokensPerModel() {
     metrics.recordLlmTokens("deepseek-v4-flash", 100, 40);
     metrics.recordLlmTokens("deepseek-v4-flash", 20, 10);
@@ -156,6 +194,8 @@ class WorkbenchMetricsTest {
     prometheusMetrics.recordTranscription(Duration.ofSeconds(1), true);
     prometheusMetrics.recordLlmCall("summarize", true);
     prometheusMetrics.recordLlmRetry("summarize");
+    prometheusMetrics.recordLlmFallback("summarize", "http_400");
+    prometheusMetrics.recordLlmOutputFailure("summarize", "schema_violation");
     prometheusMetrics.recordLlmValidationFailure("quote_mismatch");
     prometheusMetrics.recordLlmTokens("deepseek-v4-flash", 10, 5);
     prometheusMetrics.bindQueueDepth(() -> 1);
@@ -168,6 +208,8 @@ class WorkbenchMetricsTest {
           "workbench_transcription_duration_seconds_bucket",
           "workbench_llm_requests_total",
           "workbench_llm_retries_total",
+          "workbench_llm_fallbacks_total",
+          "workbench_llm_output_failures_total",
           "workbench_llm_validation_failures_total",
           "workbench_llm_tokens_total",
           "workbench_queue_depth",

@@ -95,13 +95,15 @@ class LlmClientMetricsTest {
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         "test-model",
+        "",
         "low");
   }
 
   private String successResponse(long promptTokens, long completionTokens) throws Exception {
+    // 引文是必填字段：模型输出先过 JSON Schema 校验，缺 quote 会被判结构违规。
     String content =
         json.writeValueAsString(
-            new TaskResult("摘要", List.of("要点"), List.of(new Chapter(0, 1000, "开场", 1))));
+            new TaskResult("摘要", List.of("要点"), List.of(new Chapter(0, 1000, "开场", 1, 1L, "你好"))));
     Map<String, Object> body =
         Map.of(
             "choices",

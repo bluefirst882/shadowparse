@@ -2,10 +2,12 @@ package ai.toni.videoworkbench;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -33,12 +35,16 @@ class LlmClient {
   private static final Pattern TRAILING_KEY_POINT_PUNCTUATION =
       Pattern.compile("[\\s\\p{Z}\\p{P}]+$");
 
+  private static final String SYSTEM_PROMPT = "你是视频内容分析助手，只返回合法 JSON。";
+  private static final String TRANSLATE_SYSTEM_PROMPT = "你是专业字幕翻译助手，只返回合法 JSON。";
+
   private final ObjectMapper json;
   private final HttpClient http =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build();
   private final String baseUrl;
   private final String apiKey;
   private final String model;
+  private final String fallbackModel;
   private final String reasoningEffort;
   private final WorkbenchMetrics metrics;
 
@@ -48,12 +54,14 @@ class LlmClient {
       @Value("${workbench.llm.base-url}") String baseUrl,
       @Value("${workbench.llm.api-key}") String apiKey,
       @Value("${workbench.llm.model}") String model,
+      @Value("${workbench.llm.fallback-model:}") String fallbackModel,
       @Value("${workbench.llm.reasoning-effort}") String reasoningEffort) {
     this.json = json;
     this.metrics = metrics;
     this.baseUrl = baseUrl.replaceAll("/+$", "");
     this.apiKey = apiKey;
     this.model = model;
+    this.fallbackModel = fallbackModel == null ? "" : fallbackModel.strip();
     this.reasoningEffort = reasoningEffort;
   }
 
@@ -118,39 +126,18 @@ class LlmClient {
       source.append('\n');
     }
     String prompt =
-        "以下是对同一份视频分块摘要得到的多段结果，请合并去重后返回 JSON。格式严格为 {summary:string,keyPoints:string[]}。summary 整合各块内容且不重复，keyPoints 合并语义重复的要点，不要新增未出现的信息，不要使用 Markdown。"
+        "以下是对同一份视频分块摘要得到的多段结果，请合并去重后返回 JSON，必须严格符合这个 JSON Schema：\n"
+            + LlmJsonSchema.MERGE.json()
+            + "\n要求：summary 整合各块内容且不重复，keyPoints 合并语义重复的要点，不要新增未出现的信息；只返回 JSON 对象本身，不要 Markdown。"
             + retryHint(previousError)
             + "\n"
             + source;
-    Map<String, Object> body =
-        Map.of(
-            "model",
-            model,
-            "reasoning_effort",
-            reasoningEffort,
-            "messages",
-            List.of(
-                Map.of("role", "system", "content", "你是视频内容分析助手，只返回合法 JSON。"),
-                Map.of("role", "user", "content", prompt)),
-            "response_format",
-            Map.of("type", "json_object"));
-    HttpRequest request =
-        HttpRequest.newBuilder(URI.create(baseUrl + "/chat/completions"))
-            .timeout(Duration.ofSeconds(90))
-            .header("Authorization", "Bearer " + apiKey)
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
-            .build();
-    JsonNode response = send(request, "内容服务", "summarize");
-    String content = response.path("choices").path(0).path("message").path("content").asText();
-    if (content.isBlank()) throw new IllegalStateException("内容服务未返回结果");
-    JsonNode merged = json.readTree(extractJson(content));
-    String summary = merged.path("summary").asText();
-    if (summary.isBlank() || !merged.path("keyPoints").isArray())
-      throw new IllegalStateException("内容服务未返回完整的合并结果");
+    JsonNode merged =
+        requestJson(
+            "summarize", SYSTEM_PROMPT, prompt, LlmJsonSchema.MERGE, Duration.ofSeconds(90));
     List<String> keyPoints = new ArrayList<>();
     for (JsonNode point : merged.path("keyPoints")) keyPoints.add(point.asText());
-    return new MergedResult(summary, keyPoints);
+    return new MergedResult(merged.path("summary").asText(), keyPoints);
   }
 
   /**
@@ -192,36 +179,16 @@ class LlmClient {
     String source =
         transcript.stream().map(LlmClient::sourceLine).collect(Collectors.joining("\n"));
     String prompt =
-        "根据以下带时间戳中文转写生成 JSON。格式严格为 {summary:string,keyPoints:string[],chapters:[{startMs:number,endMs:number,title:string,sourceSegmentId:number,sourceEndSegmentId:number,quote:string}]}。chapter 可覆盖连续片段：sourceSegmentId 引用开始片段，sourceEndSegmentId 引用结束片段；单片段章节两个 id 相同。章节时间必须位于首尾引用片段的范围内，按时间排序。quote 必须是逐字摘自所引用片段（sourceSegmentId..sourceEndSegmentId）转写原文的原句，不得改写、翻译或概括，服务端会逐字核验。不要使用 Markdown。"
+        "根据以下带时间戳中文转写生成 JSON，必须严格符合这个 JSON Schema：\n"
+            + LlmJsonSchema.SUMMARIZE.json()
+            + "\n补充约束：chapter 可覆盖连续片段，sourceSegmentId 引用开始片段，sourceEndSegmentId 引用结束片段，单片段章节两个 id 相同；章节时间必须位于首尾引用片段的范围内，按时间排序；quote 必须是逐字摘自所引用片段（sourceSegmentId..sourceEndSegmentId）转写原文的原句，不得改写、翻译或概括，服务端会逐字核验。只返回 JSON 对象本身，不要 Markdown 代码块、不要解释。"
             + retryHint(previousError)
             + "\n"
             + source;
-    Map<String, Object> body =
-        Map.of(
-            "model",
-            model,
-            "reasoning_effort",
-            reasoningEffort,
-            "messages",
-            List.of(
-                Map.of("role", "system", "content", "你是视频内容分析助手，只返回合法 JSON。"),
-                Map.of("role", "user", "content", prompt)),
-            "response_format",
-            Map.of("type", "json_object"));
-    HttpRequest request =
-        HttpRequest.newBuilder(URI.create(baseUrl + "/chat/completions"))
-            .timeout(Duration.ofSeconds(90))
-            .header("Authorization", "Bearer " + apiKey)
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
-            .build();
-    JsonNode response = send(request, "内容服务", "summarize");
-    String content = response.path("choices").path(0).path("message").path("content").asText();
-    if (content.isBlank()) throw new IllegalStateException("内容服务未返回结果");
-    TaskResult result = json.readValue(extractJson(content), TaskResult.class);
-    if (result.summary() == null || result.keyPoints() == null || result.chapters() == null)
-      throw new IllegalStateException("内容服务未返回完整的摘要结构");
-    return result;
+    JsonNode content =
+        requestJson(
+            "summarize", SYSTEM_PROMPT, prompt, LlmJsonSchema.SUMMARIZE, Duration.ofSeconds(90));
+    return json.treeToValue(content, TaskResult.class);
   }
 
   private static String sourceLine(TranscriptSegment segment) {
@@ -252,30 +219,17 @@ class LlmClient {
               .map(s -> "[id=" + s.id() + "] " + s.text())
               .collect(Collectors.joining("\n"));
       String prompt =
-          "将以下非中文视频逐字稿逐条翻译为简体中文。格式严格为 {translations:[{id:number,translation:string}]}。必须返回本批全部 id，保留 id，逐条对应，不要省略、合并或添加 Markdown。\n"
+          "将以下非中文视频逐字稿逐条翻译为简体中文，必须严格符合这个 JSON Schema：\n"
+              + LlmJsonSchema.TRANSLATE.json()
+              + "\n必须返回本批全部 id，保留 id，逐条对应，不要省略或合并；只返回 JSON 对象本身，不要 Markdown。\n"
               + source;
-      Map<String, Object> body =
-          Map.of(
-              "model",
-              model,
-              "reasoning_effort",
-              reasoningEffort,
-              "messages",
-              List.of(
-                  Map.of("role", "system", "content", "你是专业字幕翻译助手，只返回合法 JSON。"),
-                  Map.of("role", "user", "content", prompt)),
-              "response_format",
-              Map.of("type", "json_object"));
-      HttpRequest request =
-          HttpRequest.newBuilder(URI.create(baseUrl + "/chat/completions"))
-              .timeout(Duration.ofSeconds(180))
-              .header("Authorization", "Bearer " + apiKey)
-              .header("Content-Type", "application/json")
-              .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
-              .build();
-      JsonNode response = send(request, "翻译服务", "translate");
-      String content = response.path("choices").path(0).path("message").path("content").asText();
-      JsonNode result = json.readTree(extractJson(content));
+      JsonNode result =
+          requestJson(
+              "translate",
+              TRANSLATE_SYSTEM_PROMPT,
+              prompt,
+              LlmJsonSchema.TRANSLATE,
+              Duration.ofSeconds(180));
       for (JsonNode item : result.path("translations"))
         translations.put(item.path("id").asLong(), item.path("translation").asText().trim());
       if (chunk.stream()
@@ -292,15 +246,119 @@ class LlmClient {
         .toList();
   }
 
-  private JsonNode send(HttpRequest request, String service, String operation) throws Exception {
+  /**
+   * 发起一次结构化请求：约束返回体为 JSON 对象，解析后按 schema 机械校验；任一步失败即沿模型降级链换模型重试。
+   *
+   * <p>降级链是「主模型 → 备用模型」的一次性升级：flash 超时、报错或输出结构不可用时升级到 pro， 并打点、记 WARN 日志，便于确认降级路径真的被走到。
+   */
+  private JsonNode requestJson(
+      String operation,
+      String systemPrompt,
+      String userPrompt,
+      LlmJsonSchema.Schema schema,
+      Duration timeout)
+      throws Exception {
+    List<String> models = modelChain();
+    Exception failure = null;
+    for (int index = 0; index < models.size(); index++) {
+      String current = models.get(index);
+      try {
+        return callOnce(current, operation, systemPrompt, userPrompt, schema, timeout);
+      } catch (Exception ex) {
+        failure = ex;
+        if (index + 1 < models.size()) {
+          String next = models.get(index + 1);
+          metrics.recordLlmFallback(operation, reasonOf(ex));
+          log.warn("模型 {} 调用失败（{}）：{}；降级到 {}", current, reasonOf(ex), tail(ex.getMessage()), next);
+        }
+      }
+    }
+    throw failure;
+  }
+
+  /** 主模型 + 可选备用模型；未配置备用模型或与主模型同名时只调用主模型。 */
+  private List<String> modelChain() {
+    if (fallbackModel.isBlank() || fallbackModel.equals(model)) return List.of(model);
+    return List.of(model, fallbackModel);
+  }
+
+  private JsonNode callOnce(
+      String currentModel,
+      String operation,
+      String systemPrompt,
+      String userPrompt,
+      LlmJsonSchema.Schema schema,
+      Duration timeout)
+      throws Exception {
+    // DeepSeek 官方 API 目前不支持 response_format=json_schema（实测返回 400），
+    // 所以用 json_object 保证「一定是合法 JSON」，字段级结构由提示词内的 schema + 下方本地校验承担。
+    Map<String, Object> body =
+        Map.of(
+            "model",
+            currentModel,
+            "reasoning_effort",
+            reasoningEffort,
+            "messages",
+            List.of(
+                Map.of("role", "system", "content", systemPrompt),
+                Map.of("role", "user", "content", userPrompt)),
+            "response_format",
+            Map.of("type", "json_object"));
+    HttpRequest request =
+        HttpRequest.newBuilder(URI.create(baseUrl + "/chat/completions"))
+            .timeout(timeout)
+            .header("Authorization", "Bearer " + apiKey)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
+            .build();
+    JsonNode response = send(request, "内容服务", operation, currentModel);
+    String content = response.path("choices").path(0).path("message").path("content").asText();
+    if (content.isBlank()) throw outputFailure(operation, "empty_content", "内容服务未返回结果");
+    JsonNode parsed;
+    try {
+      parsed = json.readTree(extractJson(content));
+    } catch (Exception ex) {
+      throw outputFailure(operation, "invalid_json", "内容服务未返回有效 JSON");
+    }
+    List<String> violations = LlmJsonSchema.validate(parsed, schema.node());
+    if (!violations.isEmpty())
+      throw outputFailure(
+          operation, "schema_violation", "返回结构不符合 JSON Schema：" + String.join("；", violations));
+    return parsed;
+  }
+
+  /** 记录一次结构化输出失败（空内容 / 非法 JSON / 结构不符），并按原因打点。 */
+  private LlmOutputException outputFailure(String operation, String reason, String message) {
+    metrics.recordLlmOutputFailure(operation, reason);
+    return new LlmOutputException(reason, message);
+  }
+
+  /** 把异常归入稳定的降级原因分类，避免把 HTTP 状态码、异常类名写进标签形成高基数。 */
+  static String reasonOf(Exception ex) {
+    if (ex instanceof LlmOutputException output) return output.reason();
+    if (ex instanceof LlmApiException api) return "http_" + api.status();
+    if (ex instanceof HttpTimeoutException) return "timeout";
+    if (ex instanceof IOException) return "io_error";
+    return "unknown";
+  }
+
+  private static String tail(String message) {
+    if (message == null) return "";
+    String compact = message.replaceAll("\\s+", " ").trim();
+    return compact.length() <= 200 ? compact : compact.substring(0, 200);
+  }
+
+  private JsonNode send(HttpRequest request, String service, String operation, String currentModel)
+      throws Exception {
     boolean success = false;
     try {
       HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
       if (response.statusCode() < 200 || response.statusCode() >= 300)
-        throw new IllegalStateException(
+        throw new LlmApiException(
+            response.statusCode(),
             service + "返回 HTTP " + response.statusCode() + "：" + shortBody(response.body()));
       JsonNode body = json.readTree(response.body());
-      recordUsage(body);
+      recordUsage(currentModel, body);
       success = true;
       return body;
     } finally {
@@ -308,12 +366,42 @@ class LlmClient {
     }
   }
 
-  /** 从响应 usage 字段累计 prompt / completion token 用量（未持久化，仅作为运行指标）。 */
-  private void recordUsage(JsonNode response) {
+  /** 从响应 usage 字段累计 prompt / completion token 用量，按实际服务的模型归属。 */
+  private void recordUsage(String currentModel, JsonNode response) {
     JsonNode usage = response.path("usage");
     if (!usage.isObject()) return;
     metrics.recordLlmTokens(
-        model, usage.path("prompt_tokens").asLong(), usage.path("completion_tokens").asLong());
+        currentModel,
+        usage.path("prompt_tokens").asLong(),
+        usage.path("completion_tokens").asLong());
+  }
+
+  /** LLM 服务返回非 2xx；{@code status} 用于降级原因分类。 */
+  static class LlmApiException extends IllegalStateException {
+    private final int status;
+
+    LlmApiException(int status, String message) {
+      super(message);
+      this.status = status;
+    }
+
+    int status() {
+      return status;
+    }
+  }
+
+  /** 模型输出不可用：空内容、非法 JSON 或不符合 schema；{@code reason} 用于指标与降级分类。 */
+  static class LlmOutputException extends IllegalStateException {
+    private final String reason;
+
+    LlmOutputException(String reason, String message) {
+      super(message);
+      this.reason = reason;
+    }
+
+    String reason() {
+      return reason;
+    }
   }
 
   private static String shortBody(String body) {
