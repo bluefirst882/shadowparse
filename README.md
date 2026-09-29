@@ -32,15 +32,15 @@
 
 ## 技术栈
 
-| 层次        | 技术                                                 |
-| ----------- | ---------------------------------------------------- |
-| 后端        | Java 21、Spring Boot 3.5、Spring JDBC、Maven         |
-| 数据库      | MySQL 8 + Flyway 版本迁移                            |
-| 消息队列    | RabbitMQ 4（持久化队列 + 手动 ack，幂等由数据库条件更新保证） |
-| AI / 音视频 | Whisper（turbo）、FFmpeg、LLM API（结构化输出）      |
+| 层次        | 技术                                                                         |
+| ----------- | ---------------------------------------------------------------------------- |
+| 后端        | Java 21、Spring Boot 3.5、Spring JDBC、Maven                                 |
+| 数据库      | MySQL 8 + Flyway 版本迁移                                                    |
+| 消息队列    | RabbitMQ 4（持久化队列 + 手动 ack，幂等由数据库条件更新保证）                |
+| AI / 音视频 | Whisper（turbo）、FFmpeg、LLM API（结构化输出）                              |
 | 容错        | Resilience4j 2.3（并发隔板 + 熔断器，熔断状态可从 Actuator/Prometheus 观测） |
-| 前端        | Vue 3、TypeScript、Vite、Element Plus                |
-| 工程化      | JUnit、Spotless + google-java-format、Docker Compose |
+| 前端        | Vue 3、TypeScript、Vite、Element Plus                                        |
+| 工程化      | JUnit、Spotless + google-java-format、Docker Compose                         |
 
 ---
 
@@ -66,6 +66,7 @@
 **多实例靠租约，不靠「状态即锁」**：只有 `status` 一个字段时，第二个实例无法区分「这个 `PROCESSING` 是别人正在跑」
 还是「持有者已经死了」，只能二选一——要么启动时抢别人的活，要么让崩溃的任务永远卡住。所以领取任务时会额外写入
 `locked_by`（实例 id，来自 `WORKBENCH_INSTANCE_ID`，留空则用「主机名 + 随机后缀」）与 `lease_expires_at`：
+
 - 持有者按 `WORKBENCH_LEASE_HEARTBEAT_MILLIS` 续**自己真正在跑**的任务（内存里记着 `held` 集合，
   被放弃的行不会被续到永不过期）；巡检线程按 `WORKBENCH_LEASE_SWEEP_MILLIS` 找 `lease_expires_at` 已过的行，
   收回并重投——迁移前遗留的 `lease_expires_at is null` 行按「已过期」处理，升级期间被中断的任务不会卡住。
@@ -214,12 +215,24 @@ Whisper 推理是独立运行的常驻 HTTP 服务（`workers/whisper_worker.py 
   "currency": "USD",
   "promptTokens": 8365,
   "completionTokens": 18947,
-  "estimatedCost": 0.010300,
+  "estimatedCost": 0.0103,
   "lines": [
-    { "promptId": "summarize.v1", "model": "deepseek-v4-flash", "calls": 1,
-      "promptTokens": 3551, "completionTokens": 4758, "estimatedCost": 0.002993 },
-    { "promptId": "translate.v1", "model": "deepseek-v4-flash", "calls": 14,
-      "promptTokens": 4814, "completionTokens": 14189, "estimatedCost": 0.007307 }
+    {
+      "promptId": "summarize.v1",
+      "model": "deepseek-v4-flash",
+      "calls": 1,
+      "promptTokens": 3551,
+      "completionTokens": 4758,
+      "estimatedCost": 0.002993
+    },
+    {
+      "promptId": "translate.v1",
+      "model": "deepseek-v4-flash",
+      "calls": 14,
+      "promptTokens": 4814,
+      "completionTokens": 14189,
+      "estimatedCost": 0.007307
+    }
   ]
 }
 ```
@@ -288,16 +301,16 @@ docker run --rm --network toni-2_default -v "$PWD/ops/k6:/scripts" -w /scripts `
 下表是客户端观测到的延迟（毫秒），两轮读压测各跑 120 秒、到达速率逐段爬升，`k6` 报告**零**丢弃迭代、
 零失败请求：
 
-| 接口                                    | 到达速率      | 请求数 | 失败 | avg | p95  | p99  | max   |
-| --------------------------------------- | ------------- | ------ | ---- | --- | ---- | ---- | ----- |
-| `GET /api/tasks?limit=20`（列表）       | 20→120 次/秒  | 6493   | 0    | 2.13 | 2.96 | 4.20 | 10.73 |
-| `GET /api/tasks/{id}`（详情）           | 20→120 次/秒  | 1869   | 0    | 1.96 | 2.77 | 4.14 | 6.40  |
-| `GET /api/tasks/{id}/details`（明细）   | 20→120 次/秒  | 937    | 0    | 2.88 | 4.15 | 5.51 | 14.68 |
-| 列表（高档）                            | 100→400 次/秒 | 24222  | 0    | 1.50 | 1.91 | 2.25 | 6.15  |
-| 详情（高档）                            | 100→400 次/秒 | 6846   | 0    | 1.36 | 1.76 | 2.06 | 6.07  |
-| 明细（高档）                            | 100→400 次/秒 | 3432   | 0    | 2.11 | 2.75 | 3.13 | 6.32  |
-| `POST /api/tasks`（上传，20s）          | 恒定 2 次/秒  | 40     | 0    | 11.90 | 14.66 | 17.15 | 18.57 |
-| `POST /api/tasks`（上传，30s）          | 恒定 2 次/秒  | 61     | 0    | 10.78 | 14.84 | 18.19 | 20.65 |
+| 接口                                  | 到达速率      | 请求数 | 失败 | avg   | p95   | p99   | max   |
+| ------------------------------------- | ------------- | ------ | ---- | ----- | ----- | ----- | ----- |
+| `GET /api/tasks?limit=20`（列表）     | 20→120 次/秒  | 6493   | 0    | 2.13  | 2.96  | 4.20  | 10.73 |
+| `GET /api/tasks/{id}`（详情）         | 20→120 次/秒  | 1869   | 0    | 1.96  | 2.77  | 4.14  | 6.40  |
+| `GET /api/tasks/{id}/details`（明细） | 20→120 次/秒  | 937    | 0    | 2.88  | 4.15  | 5.51  | 14.68 |
+| 列表（高档）                          | 100→400 次/秒 | 24222  | 0    | 1.50  | 1.91  | 2.25  | 6.15  |
+| 详情（高档）                          | 100→400 次/秒 | 6846   | 0    | 1.36  | 1.76  | 2.06  | 6.07  |
+| 明细（高档）                          | 100→400 次/秒 | 3432   | 0    | 2.11  | 2.75  | 3.13  | 6.32  |
+| `POST /api/tasks`（上传，20s）        | 恒定 2 次/秒  | 40     | 0    | 11.90 | 14.66 | 17.15 | 18.57 |
+| `POST /api/tasks`（上传，30s）        | 恒定 2 次/秒  | 61     | 0    | 10.78 | 14.84 | 18.19 | 20.65 |
 
 同一时段的容器资源（`docker stats` 采样，CPU 是单核口径）：backend **37–48%**、557 MiB；
 mysql **14–17%**、199 MiB；whisper 空载 0.01%、3.37 GiB。数据库连接池上限 10 条，压测期间
@@ -330,6 +343,35 @@ mysql **14–17%**、199 MiB；whisper 空载 0.01%、3.37 GiB。数据库连接
 两轮读压测与上传轮次是分开跑的；四是排空曲线只覆盖约 100 秒，剩余积压由清理脚本删除（`DELETE /api/tasks/{id}`）。
 完整命令、采样脚本 `ops/k6/sample-queue.ps1` 与原始结果见 [docs/开发验证.md](docs/开发验证.md)。
 
+### 11. 实时推送与分片上传
+
+- **任务进度不再轮询**：`TaskRepository` 每次写完任务状态都会调 `TaskEventStream.taskChanged(taskId)`，
+  `GET /api/tasks/stream`（SSE）把「有变化」这个信号推给该任务的归属人。推的是**任务号而不是整行数据**——
+  客户端收到后按自己已鉴权的接口重新取数，推送通道因此不必再造一套归属校验与序列化，
+  也不会把别的账号的内容带到某个连接上。没有订阅者时连归属人都不会去查，原有处理路径的开销不变；
+  连接 30 分钟到期后关闭，由浏览器自动重连。
+- **前端**删掉了 3 秒轮询，改为 `EventSource` + 120ms debounce 合并刷新（一次上传会连续写好几次状态，
+  合并后只发一次列表请求）；`onopen` 补刷一次，`onerror` 退回一次主动刷新兜底。
+- **上传按 5 MiB 分片**：`POST /api/tasks/uploads` 先声明文件名与大小，服务端用
+  `sha256(ownerId + 文件名 + 大小)` 的前 16 字节当 `uploadId`——**重选同一个文件必然得到同一个 id**，
+  续传因此对客户端是无状态的（不必自己记住上次传到哪）。分片可以乱序到达，按偏移直接写进 `data.part`，
+  **写完才建 `chunk-N.done` 标记**（标记最后写，所以「有标记」等价于「这片已落盘」）；
+  `complete` 校验分片齐全且文件大小等于声明值之后才登记任务。
+- **进度存在文件系统**（`storage/uploads/<uploadId>/`），不额外建表，进程重启后进度还在；
+  访问别人的会话按 `meta.properties` 里记录的归属人判定并返回 `403`，不靠「id 猜不到」兜底。
+  前端分片走 XHR 而不是 `fetch`——上传方向的进度事件目前只有 XHR 提供。
+
+```powershell
+npm run verify:realtime-upload   # 浏览器端：空闲 8s 零轮询 + 推送驱动的阶段变化 + 限速上传看进度条
+npm run verify:sse               # 推送延迟与账号隔离：6 次全部对账，min 5 ms / 中位 7 ms / max 9 ms
+```
+
+如实记录边界：一是**推送没有心跳**，中间代理按空闲超时断开时，客户端要等浏览器自己发现断链才重连，
+期间的变化靠 `onerror` 时的一次主动刷新兜底、不是实时；二是**半截上传没有 TTL 清理**，
+用户传一半关页面会留下 `storage/uploads/<id>/` 占着磁盘；三是续传只按「同名同大小」判定、**不做内容校验**，
+要严格得把内容哈希纳入 `uploadId`；四是 SSE 是**单实例内存态**，多实例部署时推不到连在别的实例上的浏览器。
+详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
 ---
 
 ## 项目结构
@@ -341,6 +383,8 @@ mysql **14–17%**、199 MiB；whisper 空载 0.01%、3.37 GiB。数据库连接
 │       ├── java/ai/toni/videoworkbench/
 │       │   ├── TaskController.java       # REST 接口（鉴权后按账号隔离）
 │       │   ├── TaskService.java          # 任务编排与外部进程托管
+│       │   ├── TaskEventStream.java      # 任务变化推送通道（SSE，按归属人分发）
+│       │   ├── ChunkedUploadService.java # 分片上传会话与断点续传（进度存文件系统）
 │       │   ├── TaskQueue.java            # 任务队列接口（投递 + 队列不可用异常）
 │       │   ├── RabbitTaskQueue.java      # RabbitMQ 实现（持久化投递、确认打点、broker 侧深度）
 │       │   ├── TaskQueueConfig.java      # 队列 / 死信 / 重试拓扑声明
@@ -377,6 +421,8 @@ mysql **14–17%**、199 MiB；whisper 空载 0.01%、3.37 GiB。数据库连接
 │   ├── prometheus/prometheus.yml         # 抓取 backend:8080/actuator/prometheus
 │   ├── grafana/                          # 数据源与面板 provisioning（含面板 JSON）
 │   └── k6/                               # 压测：query.js（只读）/ upload.js（上传）/ sample-queue.ps1（采样）
+├── tools/                           # 真实调用与推送实测脚本（eval-live.mjs / sse-latency.mjs）
+├── verify-realtime-upload.mjs       # 浏览器端验收（Playwright）：零轮询 + 推送驱动 + 上传进度
 ├── docs/                            # 需求说明、编码规范、验收记录、面板截图
 └── compose.yaml                     # Whisper / MySQL / RabbitMQ / 后端 / 前端 / Prometheus / Grafana
 ```
@@ -388,23 +434,33 @@ mysql **14–17%**、199 MiB；whisper 空载 0.01%、3.37 GiB。数据库连接
 除 `/api/auth/**` 外，所有接口都需要 `Authorization: Bearer <token>`；
 未携带或令牌无效返回 `401`，访问他人任务返回 `403`。
 
-| 方法     | 路径                              | 说明                           |
-| -------- | --------------------------------- | ------------------------------ |
-| `POST`   | `/api/auth/register`              | 注册并返回令牌                 |
-| `POST`   | `/api/auth/login`                 | 登录并返回令牌                 |
-| `GET`    | `/api/tasks?cursor=&limit=`       | 当前账号的任务列表（游标分页） |
-| `POST`   | `/api/tasks`                      | 导入视频（multipart）          |
-| `GET`    | `/api/tasks/{id}/details`         | 任务详情（含转写与摘要结果）   |
-| `GET`    | `/api/tasks/{id}/cost`            | 单视频 LLM 用量与成本（按提示词版本分行） |
-| `POST`   | `/api/tasks/{id}/cancel`          | 取消任务                       |
-| `POST`   | `/api/tasks/{id}/retry`           | 重试摘要或重新执行本地处理     |
-| `POST`   | `/api/tasks/{id}/retranscribe`    | 重新转写                       |
-| `GET`    | `/api/tasks/{id}/video`           | 视频流（支持 Range）           |
-| `GET`    | `/api/tasks/{id}/export/{format}` | 导出 md / json / srt           |
-| `DELETE` | `/api/tasks/{id}`                 | 删除任务、视频及提取的音频     |
+| 方法     | 路径                                           | 说明                                                |
+| -------- | ---------------------------------------------- | --------------------------------------------------- |
+| `POST`   | `/api/auth/register`                           | 注册并返回令牌                                      |
+| `POST`   | `/api/auth/login`                              | 登录并返回令牌                                      |
+| `GET`    | `/api/tasks?cursor=&limit=`                    | 当前账号的任务列表（游标分页）                      |
+| `POST`   | `/api/tasks`                                   | 导入视频（multipart 一次性上传）                    |
+| `GET`    | `/api/tasks/stream`                            | 任务变化推送（SSE，令牌走 `access_token` 查询参数） |
+| `POST`   | `/api/tasks/uploads`                           | 建立或继续分片上传会话（声明文件名与大小）          |
+| `GET`    | `/api/tasks/uploads/{uploadId}`                | 查询会话已收到的分片                                |
+| `PUT`    | `/api/tasks/uploads/{uploadId}/chunks/{index}` | 提交一片（`application/octet-stream`）              |
+| `POST`   | `/api/tasks/uploads/{uploadId}/complete`       | 收齐后登记成任务                                    |
+| `GET`    | `/api/tasks/{id}/details`                      | 任务详情（含转写与摘要结果）                        |
+| `GET`    | `/api/tasks/{id}/cost`                         | 单视频 LLM 用量与成本（按提示词版本分行）           |
+| `POST`   | `/api/tasks/{id}/cancel`                       | 取消任务                                            |
+| `POST`   | `/api/tasks/{id}/retry`                        | 重试摘要或重新执行本地处理                          |
+| `POST`   | `/api/tasks/{id}/retranscribe`                 | 重新转写                                            |
+| `GET`    | `/api/tasks/{id}/video`                        | 视频流（支持 Range）                                |
+| `GET`    | `/api/tasks/{id}/export/{format}`              | 导出 md / json / srt                                |
+| `DELETE` | `/api/tasks/{id}`                              | 删除任务、视频及提取的音频                          |
 
 `GET /api/tasks` 支持 `cursor`（不透明游标，省略即第一页）与 `limit`（默认 20、上限 100），
 响应体为 `{"items":[...],"nextCursor":"..."}`，`nextCursor` 为 `null` 表示已到最后一页；详见上文「列表游标分页」。
+
+`GET /api/tasks/stream` 是一次订阅、持续推送的 SSE 连接，推送内容只有任务号（`event: tasks` / `data: <taskId>`），
+客户端据此重新取数；浏览器 `EventSource` 不能自定义请求头，所以这个端点额外接受 `access_token` 查询参数带令牌
+（与 `/{id}/video`、`/{id}/export/{format}` 同一约定，其余接口仍只认 `Authorization` 头）。
+分片上传的四个端点与 `POST /api/tasks` 是两条并存的路径：前者供前端大文件续传，后者保留给脚本与压测的单次提交。
 
 ---
 
@@ -434,12 +490,12 @@ mysql **14–17%**、199 MiB；whisper 空载 0.01%、3.37 GiB。数据库连接
 
 ### 端点
 
-| 端点                                  | 说明                                                          |
-| ------------------------------------- | ------------------------------------------------------------- |
-| `GET /actuator/health`                | 存活探针，容器 healthcheck 使用；`{"status":"UP"}`            |
-| `GET /actuator/prometheus`            | Prometheus 文本格式指标（JVM/HTTP 默认指标 + 下列自定义指标） |
-| `GET /actuator/circuitbreakers`       | 各熔断器的实时状态与计数（`state` / `failureRate` / `notPermittedCalls`） |
-| `GET /actuator/circuitbreakerevents`  | 熔断器状态变迁事件流（何时打开、何时半开、何时恢复）          |
+| 端点                                 | 说明                                                                      |
+| ------------------------------------ | ------------------------------------------------------------------------- |
+| `GET /actuator/health`               | 存活探针，容器 healthcheck 使用；`{"status":"UP"}`                        |
+| `GET /actuator/prometheus`           | Prometheus 文本格式指标（JVM/HTTP 默认指标 + 下列自定义指标）             |
+| `GET /actuator/circuitbreakers`      | 各熔断器的实时状态与计数（`state` / `failureRate` / `notPermittedCalls`） |
+| `GET /actuator/circuitbreakerevents` | 熔断器状态变迁事件流（何时打开、何时半开、何时恢复）                      |
 
 四个端点都在 `SecurityConfig` 中放行，**无需令牌**（取舍见本节末尾）。
 
@@ -447,33 +503,33 @@ mysql **14–17%**、199 MiB；whisper 空载 0.01%、3.37 GiB。数据库连接
 
 埋点集中在 `WorkbenchMetrics`，业务代码只调它的方法、不直接依赖 `MeterRegistry`；标签刻意避开任务 id、文件名等高基数维度。
 
-| 类别         | Micrometer 名                      | Prometheus 名                              | 含义                                                            | 标签                                       | 打点位置                           |
-| ------------ | ---------------------------------- | ------------------------------------------ | --------------------------------------------------------------- | ------------------------------------------ | ---------------------------------- |
-| 转写耗时     | `workbench.transcription.duration` | `workbench_transcription_duration_seconds` | 单条任务 Whisper 转写（含片段落库）耗时直方图                   | `outcome=success/failure`                  | `TaskService.transcribe`           |
-| LLM 调用结果 | `workbench.llm.requests`           | `workbench_llm_requests_total`             | 每次 LLM HTTP 调用按结果计数                                    | `operation=summarize/translate`、`outcome` | `LlmClient.send`（`finally` 记账） |
-| LLM 重试次数 | `workbench.llm.retries`            | `workbench_llm_retries_total`              | 摘要生成在单条任务内首次之外的重试次数（最多 3 次尝试）         | `operation`                                | `TaskService.generateContent`      |
-| 模型降级次数 | `workbench.llm.fallbacks`          | `workbench_llm_fallbacks_total`            | 主模型失败后升级到备用模型的次数                                | `operation`、`reason=http_400/timeout/io_error/schema_violation/empty_content/invalid_json` | `LlmClient.requestJson`            |
-| 输出结构失败 | `workbench.llm.output_failures`    | `workbench_llm_output_failures_total`      | 模型输出不可用（空内容 / 非法 JSON / 不符合 schema）的次数，即结构失败率 | `operation`、`reason=empty_content/invalid_json/schema_violation` | `LlmClient.callOnce`               |
-| 校验拦截次数 | `workbench.llm.validation_failures` | `workbench_llm_validation_failures_total` | 结果校验拦下未通过模型输出的次数（反幻觉闸门命中）             | `reason=quote_mismatch` / `quote_missing` / `invalid_chapter_*` 等 | `TaskService.generateContent`      |
-| token 用量   | `workbench.llm.tokens`             | `workbench_llm_tokens_total`               | 从 LLM 响应 `usage` 字段累加的 token 数（同时落库到 `llm_calls`，见「提示词版本化与成本核算」） | `type=prompt/completion`、`model`          | `LlmClient.recordUsage`            |
-| 队列深度     | `workbench.queue.depth`            | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge），读自 broker 的真实积压量；broker 不可达时为 `-1` | 无                                         | `RabbitTaskQueue` 构造函数绑定     |
-| 队列等待时长 | `workbench.queue.wait`             | `workbench_queue_wait_seconds`             | 任务从入队到真正开始执行的等待时长直方图（取消息 `timestamp`）  | 无                                         | `TaskQueueConsumer.handle`         |
-| 投递失败次数 | `workbench.queue.publish_failures` | `workbench_queue_publish_failures_total`   | broker 确认（publisher confirm）未成功返回的次数                | 无                                         | `RabbitTaskQueue.publish`          |
-| 退避重试次数 | `workbench.queue.retries`          | `workbench_queue_retries_total`            | 瞬时故障后安排退避重试的次数                                    | `reason=whisper_unavailable/database_unavailable/llm_unavailable`、`attempt`（即将进行的第几次尝试） | `TaskQueueConsumer.retryLater`     |
-| 死信任务数   | `workbench.queue.dead_letters`     | `workbench_queue_dead_letters_total`       | 超过重试上限、转入死信队列留档的任务数（需要人工处理）           | `reason`                                   | `TaskQueueConsumer.deadLetter`     |
-| 任务领取结果 | `workbench.task.claims`            | `workbench_task_claims_total`              | 每次投递的领取结果，`claimed` 才算真正执行、`skipped` 是被判重复投递而丢弃；同一任务无论投递多少次只有一次 `claimed` | `result=claimed/skipped`                   | `TaskService.process`              |
-| 租约回收次数 | `workbench.task.lease_reclaims`    | `workbench_task_lease_reclaims_total`      | 租约过期被收回重投的任务数（持有者崩溃才会发生，用于观测失联与恢复） | 无                                         | `TaskLease.reclaimExpired`         |
+| 类别         | Micrometer 名                       | Prometheus 名                              | 含义                                                                                                                 | 标签                                                                                                 | 打点位置                           |
+| ------------ | ----------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| 转写耗时     | `workbench.transcription.duration`  | `workbench_transcription_duration_seconds` | 单条任务 Whisper 转写（含片段落库）耗时直方图                                                                        | `outcome=success/failure`                                                                            | `TaskService.transcribe`           |
+| LLM 调用结果 | `workbench.llm.requests`            | `workbench_llm_requests_total`             | 每次 LLM HTTP 调用按结果计数                                                                                         | `operation=summarize/translate`、`outcome`                                                           | `LlmClient.send`（`finally` 记账） |
+| LLM 重试次数 | `workbench.llm.retries`             | `workbench_llm_retries_total`              | 摘要生成在单条任务内首次之外的重试次数（最多 3 次尝试）                                                              | `operation`                                                                                          | `TaskService.generateContent`      |
+| 模型降级次数 | `workbench.llm.fallbacks`           | `workbench_llm_fallbacks_total`            | 主模型失败后升级到备用模型的次数                                                                                     | `operation`、`reason=http_400/timeout/io_error/schema_violation/empty_content/invalid_json`          | `LlmClient.requestJson`            |
+| 输出结构失败 | `workbench.llm.output_failures`     | `workbench_llm_output_failures_total`      | 模型输出不可用（空内容 / 非法 JSON / 不符合 schema）的次数，即结构失败率                                             | `operation`、`reason=empty_content/invalid_json/schema_violation`                                    | `LlmClient.callOnce`               |
+| 校验拦截次数 | `workbench.llm.validation_failures` | `workbench_llm_validation_failures_total`  | 结果校验拦下未通过模型输出的次数（反幻觉闸门命中）                                                                   | `reason=quote_mismatch` / `quote_missing` / `invalid_chapter_*` 等                                   | `TaskService.generateContent`      |
+| token 用量   | `workbench.llm.tokens`              | `workbench_llm_tokens_total`               | 从 LLM 响应 `usage` 字段累加的 token 数（同时落库到 `llm_calls`，见「提示词版本化与成本核算」）                      | `type=prompt/completion`、`model`                                                                    | `LlmClient.recordUsage`            |
+| 队列深度     | `workbench.queue.depth`             | `workbench_queue_depth`                    | 当前排队等待处理的任务数（Gauge），读自 broker 的真实积压量；broker 不可达时为 `-1`                                  | 无                                                                                                   | `RabbitTaskQueue` 构造函数绑定     |
+| 队列等待时长 | `workbench.queue.wait`              | `workbench_queue_wait_seconds`             | 任务从入队到真正开始执行的等待时长直方图（取消息 `timestamp`）                                                       | 无                                                                                                   | `TaskQueueConsumer.handle`         |
+| 投递失败次数 | `workbench.queue.publish_failures`  | `workbench_queue_publish_failures_total`   | broker 确认（publisher confirm）未成功返回的次数                                                                     | 无                                                                                                   | `RabbitTaskQueue.publish`          |
+| 退避重试次数 | `workbench.queue.retries`           | `workbench_queue_retries_total`            | 瞬时故障后安排退避重试的次数                                                                                         | `reason=whisper_unavailable/database_unavailable/llm_unavailable`、`attempt`（即将进行的第几次尝试） | `TaskQueueConsumer.retryLater`     |
+| 死信任务数   | `workbench.queue.dead_letters`      | `workbench_queue_dead_letters_total`       | 超过重试上限、转入死信队列留档的任务数（需要人工处理）                                                               | `reason`                                                                                             | `TaskQueueConsumer.deadLetter`     |
+| 任务领取结果 | `workbench.task.claims`             | `workbench_task_claims_total`              | 每次投递的领取结果，`claimed` 才算真正执行、`skipped` 是被判重复投递而丢弃；同一任务无论投递多少次只有一次 `claimed` | `result=claimed/skipped`                                                                             | `TaskService.process`              |
+| 租约回收次数 | `workbench.task.lease_reclaims`     | `workbench_task_lease_reclaims_total`      | 租约过期被收回重投的任务数（持有者崩溃才会发生，用于观测失联与恢复）                                                 | 无                                                                                                   | `TaskLease.reclaimExpired`         |
 
 下表的指标由 `resilience4j-micrometer` 自动导出，名字不是本项目起的，但它是判断「下游到底挂没挂」最直接的入口：
 
-| Micrometer 名                                    | Prometheus 名                                    | 含义                                                              | 标签                       |
-| ------------------------------------------------ | ------------------------------------------------ | ----------------------------------------------------------------- | -------------------------- |
-| `resilience4j.circuitbreaker.state`              | `resilience4j_circuitbreaker_state`              | 熔断器状态，`closed/open/half_open/disabled/forced_open/metrics_only` 各一条 Gauge，值 `1` 表示当前处于该状态 | `name=llm/whisper`、`state` |
-| `resilience4j.circuitbreaker.calls`              | `resilience4j_circuitbreaker_calls_seconds`      | 放行调用的耗时与结果（Summary，`_count` 即次数）                  | `name`、`kind=successful/failed/not_permitted/ignored` |
-| `resilience4j.circuitbreaker.failure.rate`       | `resilience4j_circuitbreaker_failure_rate`       | 当前窗口内的失败率；`-1` 表示样本数还没到 `minimum-number-of-calls`，暂不判定 | `name`                     |
-| `resilience4j.circuitbreaker.not.permitted.calls`| `resilience4j_circuitbreaker_not_permitted_calls_total` | 被熔断器挡下、**没有发出请求**的调用数                     | `name`、`kind=not_permitted` |
-| `resilience4j.bulkhead.available.concurrent.calls`| `resilience4j_bulkhead_available_concurrent_calls` | 并发隔板剩余名额，降到 `0` 表示该下游并发已满、新调用会被本地拒绝 | `name`                     |
-| `resilience4j.bulkhead.max.allowed.concurrent.calls`| `resilience4j_bulkhead_max_allowed_concurrent_calls` | 并发隔板容量                                                   | `name`                     |
+| Micrometer 名                                        | Prometheus 名                                           | 含义                                                                                                          | 标签                                                   |
+| ---------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `resilience4j.circuitbreaker.state`                  | `resilience4j_circuitbreaker_state`                     | 熔断器状态，`closed/open/half_open/disabled/forced_open/metrics_only` 各一条 Gauge，值 `1` 表示当前处于该状态 | `name=llm/whisper`、`state`                            |
+| `resilience4j.circuitbreaker.calls`                  | `resilience4j_circuitbreaker_calls_seconds`             | 放行调用的耗时与结果（Summary，`_count` 即次数）                                                              | `name`、`kind=successful/failed/not_permitted/ignored` |
+| `resilience4j.circuitbreaker.failure.rate`           | `resilience4j_circuitbreaker_failure_rate`              | 当前窗口内的失败率；`-1` 表示样本数还没到 `minimum-number-of-calls`，暂不判定                                 | `name`                                                 |
+| `resilience4j.circuitbreaker.not.permitted.calls`    | `resilience4j_circuitbreaker_not_permitted_calls_total` | 被熔断器挡下、**没有发出请求**的调用数                                                                        | `name`、`kind=not_permitted`                           |
+| `resilience4j.bulkhead.available.concurrent.calls`   | `resilience4j_bulkhead_available_concurrent_calls`      | 并发隔板剩余名额，降到 `0` 表示该下游并发已满、新调用会被本地拒绝                                             | `name`                                                 |
+| `resilience4j.bulkhead.max.allowed.concurrent.calls` | `resilience4j_bulkhead_max_allowed_concurrent_calls`    | 并发隔板容量                                                                                                  | `name`                                                 |
 
 - **熔断计数口径**：熔断器按**一次业务请求**（`requestJson`）计数，而一次 `requestJson` 内部主模型失败后还会再试备用模型，
   所以 `workbench_llm_requests_total{outcome="failure"}` 通常是 `resilience4j_circuitbreaker_calls_seconds_count{kind="failed"}`
@@ -637,46 +693,46 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 
 ## 配置项
 
-| 变量                                | 默认值                             | 说明                                               |
-| ----------------------------------- | ---------------------------------- | -------------------------------------------------- |
-| `WORKBENCH_STORAGE_DIR`             | `./storage`                        | 视频、音频与模型文件的本机存放目录                 |
-| `WORKBENCH_MAX_UPLOAD_BYTES`        | 20GB                               | 单个视频大小上限                                   |
-| `WORKBENCH_PROCESS_TIMEOUT_MINUTES` | 180                                | 外部进程超时时间；首次下载模型时应保留充足时间     |
-| `RABBITMQ_HOST`                     | `localhost`                        | 消息队列地址（compose 内为服务名 `rabbitmq`）      |
-| `RABBITMQ_PORT`                     | 5672                               | 消息队列端口                                       |
-| `RABBITMQ_HOST_PORT`                | 5672                               | RabbitMQ 映射到宿主机的 AMQP 端口                  |
-| `RABBITMQ_MANAGEMENT_HOST_PORT`     | 15672                              | RabbitMQ 管理台映射到宿主机的端口                  |
-| `RABBITMQ_USERNAME`                 | `workbench`                        | RabbitMQ 账号（compose 首次初始化时创建）          |
-| `RABBITMQ_PASSWORD`                 | 无（compose 必填）                 | RabbitMQ 密码                                      |
-| `WORKBENCH_QUEUE_MAX_ATTEMPTS`      | 4                                  | 瞬时故障最多尝试几次，用尽后进死信队列              |
-| `WORKBENCH_QUEUE_RETRY_INITIAL_DELAY_MILLIS` | 5000                       | 首次重试前的退避时间（毫秒）                       |
-| `WORKBENCH_QUEUE_RETRY_MULTIPLIER`  | 2                                  | 退避倍率：第 n 次失败后等待「初始延迟 × 倍率^(n-1)」 |
-| `WORKBENCH_INSTANCE_ID`             | 空                                 | 多实例认领用的实例标识。留空时用「主机名 + 随机 8 位后缀」；**同一时刻两个实例不能共用同一值** |
-| `WORKBENCH_LEASE_SECONDS`           | 90                                 | 任务租约时长（秒）。持有者崩溃后，超过这个时长且被巡检扫到才会被回收重投 |
-| `WORKBENCH_LEASE_HEARTBEAT_MILLIS`  | 20000                              | 续租心跳间隔（毫秒），必须明显小于租约时长，否则自己的任务会被自己回收 |
-| `WORKBENCH_LEASE_SWEEP_MILLIS`      | 30000                              | 过期租约巡检间隔（毫秒）。回收最坏延迟 ≈ 租约时长 + 巡检间隔       |
-| `FFMPEG_PATH`                       | `ffmpeg`                           | FFmpeg 可执行文件路径                              |
-| `WHISPER_MODEL`                     | `turbo`                            | Whisper 模型规格，`whisper` 容器启动时加载          |
-| `WHISPER_SERVICE_URL`               | `http://whisper:8090`              | 后端访问的 Whisper 地址（compose 内用服务名）      |
-| `WHISPER_MODELS_DIR`                | `./models/whisper`                 | 宿主机模型缓存目录，挂载到容器 `/models`           |
-| `WHISPER_HOST_PORT`                 | 8090                               | `whisper` 服务映射到宿主机的端口，`/health` 可查设备 |
-| `WHISPER_CPU_THREADS`               | 4                                  | 容器内 CPU 推理线程数（`OMP_NUM_THREADS`）         |
-| `WORKBENCH_JWT_SECRET`              | 无（必填）                         | JWT 签名密钥，至少 32 字符，需自行随机生成         |
-| `WORKBENCH_TOKEN_TTL_HOURS`         | 24                                 | 令牌有效期（小时）                                 |
-| `LLM_API_KEY`                       | 空                                 | 云端 LLM 密钥，留空则跳过摘要阶段                  |
-| `LLM_MODEL`                         | `deepseek-v4-flash`                | 主模型                                             |
-| `LLM_FALLBACK_MODEL`                | `deepseek-v4-pro`                  | 主模型失败/超时/结构不可用时升级到的备用模型，留空即关闭降级 |
-| `LLM_MAX_INPUT_CHARS`               | 60000                              | 单次摘要请求的字符上限，按完整转写片段分批         |
-| `LLM_PRICES`                        | 空                                 | 模型单价，格式 `模型:每百万输入token单价:每百万输出token单价`（逗号分隔多条）。留空则只统计 token，成本导出为 `null`；仓库不内置任何价格 |
-| `LLM_PRICE_CURRENCY`                | `USD`                              | 成本导出里的货币标记，随你填入单价的币种调整       |
-| `WORKBENCH_LLM_TIMEOUT_SECONDS`     | 90                                 | 摘要/合并单次 LLM 请求的超时（秒），由 `HttpRequest.timeout` 强制 |
-| `WORKBENCH_LLM_TRANSLATE_TIMEOUT_SECONDS` | 180                          | 翻译单次 LLM 请求的超时（秒）；翻译输出比输入长，给更宽的上限 |
-| `WORKBENCH_LLM_MAX_CONCURRENT`      | 4                                  | LLM 并发隔板容量，超出直接拒绝（不排队）；置 0 会让所有 LLM 调用立即被拒 |
-| `WORKBENCH_WHISPER_MAX_CONCURRENT`  | 1                                  | Whisper 并发隔板容量，默认串行；worker 内部还会对 `/transcribe` 加锁，同时跑多个转写只会互相拖慢甚至 OOM |
-| `PROMETHEUS_HOST_PORT`              | 9090                               | Prometheus 映射到宿主机的端口                      |
-| `GRAFANA_HOST_PORT`                 | 3000                               | Grafana 映射到宿主机的端口                         |
-| `GRAFANA_ADMIN_USER`                | `admin`                            | Grafana 管理员账号                                 |
-| `GRAFANA_ADMIN_PASSWORD`            | `workbench`                        | Grafana 管理员密码（仅本地开发默认值，请按需修改） |
+| 变量                                         | 默认值                | 说明                                                                                                                                     |
+| -------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `WORKBENCH_STORAGE_DIR`                      | `./storage`           | 视频、音频与模型文件的本机存放目录                                                                                                       |
+| `WORKBENCH_MAX_UPLOAD_BYTES`                 | 20GB                  | 单个视频大小上限                                                                                                                         |
+| `WORKBENCH_PROCESS_TIMEOUT_MINUTES`          | 180                   | 外部进程超时时间；首次下载模型时应保留充足时间                                                                                           |
+| `RABBITMQ_HOST`                              | `localhost`           | 消息队列地址（compose 内为服务名 `rabbitmq`）                                                                                            |
+| `RABBITMQ_PORT`                              | 5672                  | 消息队列端口                                                                                                                             |
+| `RABBITMQ_HOST_PORT`                         | 5672                  | RabbitMQ 映射到宿主机的 AMQP 端口                                                                                                        |
+| `RABBITMQ_MANAGEMENT_HOST_PORT`              | 15672                 | RabbitMQ 管理台映射到宿主机的端口                                                                                                        |
+| `RABBITMQ_USERNAME`                          | `workbench`           | RabbitMQ 账号（compose 首次初始化时创建）                                                                                                |
+| `RABBITMQ_PASSWORD`                          | 无（compose 必填）    | RabbitMQ 密码                                                                                                                            |
+| `WORKBENCH_QUEUE_MAX_ATTEMPTS`               | 4                     | 瞬时故障最多尝试几次，用尽后进死信队列                                                                                                   |
+| `WORKBENCH_QUEUE_RETRY_INITIAL_DELAY_MILLIS` | 5000                  | 首次重试前的退避时间（毫秒）                                                                                                             |
+| `WORKBENCH_QUEUE_RETRY_MULTIPLIER`           | 2                     | 退避倍率：第 n 次失败后等待「初始延迟 × 倍率^(n-1)」                                                                                     |
+| `WORKBENCH_INSTANCE_ID`                      | 空                    | 多实例认领用的实例标识。留空时用「主机名 + 随机 8 位后缀」；**同一时刻两个实例不能共用同一值**                                           |
+| `WORKBENCH_LEASE_SECONDS`                    | 90                    | 任务租约时长（秒）。持有者崩溃后，超过这个时长且被巡检扫到才会被回收重投                                                                 |
+| `WORKBENCH_LEASE_HEARTBEAT_MILLIS`           | 20000                 | 续租心跳间隔（毫秒），必须明显小于租约时长，否则自己的任务会被自己回收                                                                   |
+| `WORKBENCH_LEASE_SWEEP_MILLIS`               | 30000                 | 过期租约巡检间隔（毫秒）。回收最坏延迟 ≈ 租约时长 + 巡检间隔                                                                             |
+| `FFMPEG_PATH`                                | `ffmpeg`              | FFmpeg 可执行文件路径                                                                                                                    |
+| `WHISPER_MODEL`                              | `turbo`               | Whisper 模型规格，`whisper` 容器启动时加载                                                                                               |
+| `WHISPER_SERVICE_URL`                        | `http://whisper:8090` | 后端访问的 Whisper 地址（compose 内用服务名）                                                                                            |
+| `WHISPER_MODELS_DIR`                         | `./models/whisper`    | 宿主机模型缓存目录，挂载到容器 `/models`                                                                                                 |
+| `WHISPER_HOST_PORT`                          | 8090                  | `whisper` 服务映射到宿主机的端口，`/health` 可查设备                                                                                     |
+| `WHISPER_CPU_THREADS`                        | 4                     | 容器内 CPU 推理线程数（`OMP_NUM_THREADS`）                                                                                               |
+| `WORKBENCH_JWT_SECRET`                       | 无（必填）            | JWT 签名密钥，至少 32 字符，需自行随机生成                                                                                               |
+| `WORKBENCH_TOKEN_TTL_HOURS`                  | 24                    | 令牌有效期（小时）                                                                                                                       |
+| `LLM_API_KEY`                                | 空                    | 云端 LLM 密钥，留空则跳过摘要阶段                                                                                                        |
+| `LLM_MODEL`                                  | `deepseek-v4-flash`   | 主模型                                                                                                                                   |
+| `LLM_FALLBACK_MODEL`                         | `deepseek-v4-pro`     | 主模型失败/超时/结构不可用时升级到的备用模型，留空即关闭降级                                                                             |
+| `LLM_MAX_INPUT_CHARS`                        | 60000                 | 单次摘要请求的字符上限，按完整转写片段分批                                                                                               |
+| `LLM_PRICES`                                 | 空                    | 模型单价，格式 `模型:每百万输入token单价:每百万输出token单价`（逗号分隔多条）。留空则只统计 token，成本导出为 `null`；仓库不内置任何价格 |
+| `LLM_PRICE_CURRENCY`                         | `USD`                 | 成本导出里的货币标记，随你填入单价的币种调整                                                                                             |
+| `WORKBENCH_LLM_TIMEOUT_SECONDS`              | 90                    | 摘要/合并单次 LLM 请求的超时（秒），由 `HttpRequest.timeout` 强制                                                                        |
+| `WORKBENCH_LLM_TRANSLATE_TIMEOUT_SECONDS`    | 180                   | 翻译单次 LLM 请求的超时（秒）；翻译输出比输入长，给更宽的上限                                                                            |
+| `WORKBENCH_LLM_MAX_CONCURRENT`               | 4                     | LLM 并发隔板容量，超出直接拒绝（不排队）；置 0 会让所有 LLM 调用立即被拒                                                                 |
+| `WORKBENCH_WHISPER_MAX_CONCURRENT`           | 1                     | Whisper 并发隔板容量，默认串行；worker 内部还会对 `/transcribe` 加锁，同时跑多个转写只会互相拖慢甚至 OOM                                 |
+| `PROMETHEUS_HOST_PORT`                       | 9090                  | Prometheus 映射到宿主机的端口                                                                                                            |
+| `GRAFANA_HOST_PORT`                          | 3000                  | Grafana 映射到宿主机的端口                                                                                                               |
+| `GRAFANA_ADMIN_USER`                         | `admin`               | Grafana 管理员账号                                                                                                                       |
+| `GRAFANA_ADMIN_PASSWORD`                     | `workbench`           | Grafana 管理员密码（仅本地开发默认值，请按需修改）                                                                                       |
 
 > 密钥仅由后端读取，不会写入日志、前端响应或导出文件。
 
@@ -819,6 +875,28 @@ Whisper 不再跑在宿主机 Python 进程里，而是 compose 里的 `whisper`
 - 如实记录边界：单机同机压测（客户端与服务端抢同一份 CPU），数字不能外推为生产容量；
   上传场景只压接收路径、**不是端到端 QPS**；未做长时间稳定性与读写混合压测；
   排空曲线只覆盖约 100 秒。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
+前端实时推送与分片上传（P3-3）在容器环境实测（验收标准：进度实时无延迟、大文件可断点续传）：
+
+- **轮询确实删掉了**：登录后静置 **8 秒**，`/api/tasks` 列表请求 **0 次**（改造前每 3 秒一次，8 秒内必然 ≥2 次）。
+- **推送驱动界面**：上传一个 4 秒样本，任务行在无人刷新的情况下自动出现，阶段文字自己走了
+  「本地转写 45% → 生成内容 85% → 已完成 100%」**3 次**；全程收到 **6 次**推送事件、
+  触发 **4 次**列表刷新（少于事件数正是 120 ms debounce 合并的效果）。两条命令：
+  `npm run verify:realtime-upload`（Playwright + 真实 Chrome，经 nginx `5174`，跑完自动删掉本次任务）。
+- **延迟可对账**：`npm run verify:sse` 用 4 秒样本触发一次完整流程，每收到推送立刻回查 `updated_at`
+  比对，6 次全部对得上账 —— **min 5 ms / 中位 7 ms / max 9 ms**；同一后端上另一个账号订阅整个过程中
+  **只收到 `ready`**，没有任何关于该任务的推送；无令牌订阅返回 `401`。
+- **断点续传**：12,662,260 字节（3 片）文件只传第 0、2 片后中断，服务端 `receivedChunks=[0,2]`；
+  重选同一文件拿到**同一个 `uploadId`** 与同一份已收分片，补传第 1 片后 `complete` 登记出的任务
+  `sizeBytes` 与源文件逐字节一致，随后会话目录被清空（`/app/storage/uploads` 计数回到 0）。
+- **浏览器验证暴露并修掉两个问题**：分片 `PUT` 一直返回 `403 Invalid CORS request`——浏览器对**同源**写请求
+  也会带 `Origin` 头，而 `CorsConfig.allowedMethods` 里没列 `PUT`（curl 不带 `Origin`，所以同端点一直 200，
+  只有真实浏览器能发现），已补白名单并加回归用例；进度条 `el-progress` 没有默认宽度，在按内容定宽的网格项里
+  塌成 0 宽（DOM 里在、`aria-valuenow` 也在变，但肉眼看不见），已显式定宽。后端 `mvnw verify`：
+  `Tests run: 144, Failures: 0, Errors: 0, Skipped: 4`，Spotless 通过。
+- 如实记录边界：推送**没有心跳**（代理空闲超时会断，重连前不实时）；半截上传**没有 TTL 清理**；
+  续传只按「同名同大小」判定、不做内容校验；SSE 是**单实例内存态**，多实例部署推不到别的实例上的连接。
+  详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 
 ---
 
