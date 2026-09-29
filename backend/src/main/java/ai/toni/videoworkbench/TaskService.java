@@ -124,20 +124,45 @@ class TaskService {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请选择有效的视频文件");
     if (file.getSize() > maxUploadBytes)
       throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "视频文件超过允许大小");
+    Path staged = null;
+    try {
+      Files.createDirectories(storage);
+      // 先落到暂存名再改名：登记过程中的任何失败都不会在存储目录里留下一份「看起来像任务」的视频。
+      staged = storage.resolve("upload-" + UUID.randomUUID() + ".part");
+      file.transferTo(staged);
+    } catch (IOException ex) {
+      deleteIfExists(staged);
+      throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "无法保存视频文件");
+    }
+    return registerVideo(staged, file.getOriginalFilename(), ownerId);
+  }
+
+  /**
+   * 把已经落盘的视频登记成任务并投递。分片上传组装完成后走的是同一个入口，保证两条上传路径的 校验、落盘与投递语义一致。
+   *
+   * @param staged 已经写在存储目录里的暂存文件，成功后会被改名成正式文件名
+   */
+  VideoTask registerVideo(Path staged, String originalName, String ownerId) {
     Path target = null;
     boolean persisted = false;
     try {
+      long size = Files.size(staged);
+      if (!isVideo(null, originalName))
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请选择有效的视频文件");
+      if (size > maxUploadBytes)
+        throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "视频文件超过允许大小");
       Files.createDirectories(storage);
       String id = UUID.randomUUID().toString();
-      target = storage.resolve(id + extension(file.getOriginalFilename()));
-      file.transferTo(target);
+      target = storage.resolve(id + extension(originalName));
+      // 同一文件系统内的改名是原子的，也不会像复制那样让大文件占两份空间。
+      Files.move(staged, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
       Instant now = Instant.now();
       VideoTask task =
           new VideoTask(
               id,
-              safeName(file.getOriginalFilename()),
+              safeName(originalName),
               target.toAbsolutePath().toString(),
-              Files.size(target),
+              size,
               TaskStatus.QUEUED,
               TaskStage.IMPORT,
               0,
@@ -231,7 +256,7 @@ class TaskService {
     if (cleanupFailure != null) {
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "本地文件清理失败，任务记录已保留");
     }
-    tasks.delete(id);
+    tasks.delete(id, ownerId);
   }
 
   /** 投递任务；broker 不可用时明确失败，不假装已经入队。重复投递由领取时的原子更新兜底。 */
@@ -569,7 +594,8 @@ class TaskService {
     }
   }
 
-  private boolean isVideo(String type, String name) {
+  /** 只按文件名判断（分片上传在建立会话时只有文件名可用，拿不到 multipart 的 content type）。 */
+  static boolean isVideo(String type, String name) {
     return type != null && type.startsWith("video/")
         || name != null && name.matches("(?i).*\\.(mp4|mov|mkv|webm|avi)$");
   }

@@ -21,7 +21,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 class TaskRepositoryTest {
   private final JdbcTemplate jdbc = Mockito.mock(JdbcTemplate.class);
-  private final TaskRepository repository = new TaskRepository(jdbc, new ObjectMapper());
+  private final TaskRepository repository =
+      new TaskRepository(jdbc, new ObjectMapper(), new TaskEventStream(jdbc));
 
   @Test
   void filtersTaskListByOwner() {

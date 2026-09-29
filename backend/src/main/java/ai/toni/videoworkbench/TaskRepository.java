@@ -18,10 +18,12 @@ import org.springframework.transaction.annotation.Transactional;
 class TaskRepository {
   private final JdbcTemplate jdbc;
   private final ObjectMapper json;
+  private final TaskEventStream events;
 
-  TaskRepository(JdbcTemplate jdbc, ObjectMapper json) {
+  TaskRepository(JdbcTemplate jdbc, ObjectMapper json, TaskEventStream events) {
     this.jdbc = jdbc;
     this.json = json;
+    this.events = events;
   }
 
   private final RowMapper<VideoTask> mapper = (r, n) -> map(r);
@@ -92,30 +94,36 @@ class TaskRepository {
         t.errorMessage(),
         Timestamp.from(t.createdAt()),
         Timestamp.from(t.updatedAt()));
+    events.taskChanged(t.id(), ownerId);
   }
 
   void update(String id, TaskStatus s, TaskStage stage, int progress, String error) {
     // 租约只在 PROCESSING 期间存在：任何离开 PROCESSING 的状态写入都顺手清掉持有者与租约，
     // 免得一条已经 FAILED 的任务上还挂着上一任持有者的租约，排查时产生误导。
     boolean holding = s == TaskStatus.PROCESSING;
-    jdbc.update(
-        "update tasks set status=?,stage=?,progress=?,error_message=?,updated_at=?"
-            + (holding ? "" : ",locked_by=null,lease_expires_at=null")
-            + " where id=?",
-        s.name(),
-        stage.name(),
-        progress,
-        error,
-        Timestamp.from(Instant.now()),
-        id);
+    int updated =
+        jdbc.update(
+            "update tasks set status=?,stage=?,progress=?,error_message=?,updated_at=?"
+                + (holding ? "" : ",locked_by=null,lease_expires_at=null")
+                + " where id=?",
+            s.name(),
+            stage.name(),
+            progress,
+            error,
+            Timestamp.from(Instant.now()),
+            id);
+    if (updated > 0) events.taskChanged(id);
   }
 
   boolean cancel(String id) {
-    return jdbc.update(
-            "update tasks set cancelled=true,status='CANCELLED',updated_at=? where id=? and status in ('QUEUED','PROCESSING')",
-            Timestamp.from(Instant.now()),
-            id)
-        == 1;
+    boolean cancelled =
+        jdbc.update(
+                "update tasks set cancelled=true,status='CANCELLED',updated_at=? where id=? and status in ('QUEUED','PROCESSING')",
+                Timestamp.from(Instant.now()),
+                id)
+            == 1;
+    if (cancelled) events.taskChanged(id);
+    return cancelled;
   }
 
   void reset(String id, TaskStage stage) {
@@ -124,6 +132,7 @@ class TaskRepository {
         stage.name(),
         Timestamp.from(Instant.now()),
         id);
+    events.taskChanged(id);
   }
 
   /**
@@ -133,13 +142,16 @@ class TaskRepository {
    * 有人在跑、什么时候算失联」，不参与幂等裁决。
    */
   boolean claimForProcessing(String id, String instanceId, Instant leaseExpiresAt) {
-    return jdbc.update(
-            "update tasks set status='PROCESSING',locked_by=?,lease_expires_at=?,updated_at=? where id=? and status='QUEUED' and cancelled=false",
-            instanceId,
-            Timestamp.from(leaseExpiresAt),
-            Timestamp.from(Instant.now()),
-            id)
-        == 1;
+    boolean claimed =
+        jdbc.update(
+                "update tasks set status='PROCESSING',locked_by=?,lease_expires_at=?,updated_at=? where id=? and status='QUEUED' and cancelled=false",
+                instanceId,
+                Timestamp.from(leaseExpiresAt),
+                Timestamp.from(Instant.now()),
+                id)
+            == 1;
+    if (claimed) events.taskChanged(id);
+    return claimed;
   }
 
   /**
@@ -181,12 +193,15 @@ class TaskRepository {
    */
   boolean releaseExpiredClaim(String id, Instant now) {
     Timestamp at = Timestamp.from(now);
-    return jdbc.update(
-            "update tasks set status='QUEUED',locked_by=null,lease_expires_at=null,updated_at=? where id=? and status='PROCESSING' and (lease_expires_at is null or lease_expires_at<?)",
-            at,
-            id,
-            at)
-        == 1;
+    boolean released =
+        jdbc.update(
+                "update tasks set status='QUEUED',locked_by=null,lease_expires_at=null,updated_at=? where id=? and status='PROCESSING' and (lease_expires_at is null or lease_expires_at<?)",
+                at,
+                id,
+                at)
+            == 1;
+    if (released) events.taskChanged(id);
+    return released;
   }
 
   /**
@@ -209,13 +224,16 @@ class TaskRepository {
    */
   boolean releaseProcessing(String id, String instanceId, Instant now) {
     Timestamp at = Timestamp.from(now);
-    return jdbc.update(
-            "update tasks set status='QUEUED',locked_by=null,lease_expires_at=null,updated_at=? where id=? and status='PROCESSING' and (locked_by=? or lease_expires_at is null or lease_expires_at<?)",
-            at,
-            id,
-            instanceId,
-            at)
-        == 1;
+    boolean released =
+        jdbc.update(
+                "update tasks set status='QUEUED',locked_by=null,lease_expires_at=null,updated_at=? where id=? and status='PROCESSING' and (locked_by=? or lease_expires_at is null or lease_expires_at<?)",
+                at,
+                id,
+                instanceId,
+                at)
+            == 1;
+    if (released) events.taskChanged(id);
+    return released;
   }
 
   @Transactional
@@ -288,10 +306,12 @@ class TaskRepository {
         .findFirst();
   }
 
-  void delete(String id) {
+  /** 删除任务。归属人由调用方传入：删完这一行就查不到 owner 了，而界面（包括同账号的其它页面） 仍需要收到一次「这条任务没了」的通知。 */
+  void delete(String id, String ownerId) {
     jdbc.update("delete from transcript_segments where task_id=?", id);
     jdbc.update("delete from task_results where task_id=?", id);
     jdbc.update("delete from tasks where id=?", id);
+    events.taskChanged(id, ownerId);
   }
 
   boolean cancelled(String id) {

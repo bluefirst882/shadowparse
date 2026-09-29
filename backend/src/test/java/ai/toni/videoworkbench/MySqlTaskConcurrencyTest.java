@@ -32,7 +32,10 @@ class MySqlTaskConcurrencyTest {
     TaskRepository tasks =
         new TaskRepository(
             new org.springframework.jdbc.core.JdbcTemplate(dataSource(url, username, password)),
-            new ObjectMapper());
+            new ObjectMapper(),
+            new TaskEventStream(
+                new org.springframework.jdbc.core.JdbcTemplate(
+                    dataSource(url, username, password))));
     org.springframework.jdbc.core.JdbcTemplate jdbc =
         new org.springframework.jdbc.core.JdbcTemplate(dataSource(url, username, password));
     UserRepository users = new UserRepository(jdbc);
@@ -68,7 +71,7 @@ class MySqlTaskConcurrencyTest {
       start.countDown();
       workers.shutdownNow();
       workers.awaitTermination(1, TimeUnit.SECONDS);
-      tasks.delete(id);
+      tasks.delete(id, owner);
       jdbc.update("delete from users where id=?", owner);
     }
   }
@@ -91,7 +94,7 @@ class MySqlTaskConcurrencyTest {
         .migrate();
     org.springframework.jdbc.core.JdbcTemplate jdbc =
         new org.springframework.jdbc.core.JdbcTemplate(dataSource(url, username, password));
-    TaskRepository tasks = new TaskRepository(jdbc, new ObjectMapper());
+    TaskRepository tasks = new TaskRepository(jdbc, new ObjectMapper(), new TaskEventStream(jdbc));
     UserRepository users = new UserRepository(jdbc);
     String owner = UUID.randomUUID().toString();
     users.save(new User(owner, "lease-" + owner.substring(0, 8), "unused-hash"));
@@ -120,9 +123,9 @@ class MySqlTaskConcurrencyTest {
       org.junit.jupiter.api.Assertions.assertNull(
           jdbc.queryForObject("select locked_by from tasks where id=?", String.class, expiredId));
     } finally {
-      tasks.delete(liveId);
-      tasks.delete(expiredId);
-      tasks.delete(legacyId);
+      tasks.delete(liveId, owner);
+      tasks.delete(expiredId, owner);
+      tasks.delete(legacyId, owner);
       jdbc.update("delete from users where id=?", owner);
     }
   }

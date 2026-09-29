@@ -3,10 +3,13 @@ package ai.toni.videoworkbench;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -48,6 +51,8 @@ class ApiErrorResponseTest {
   @MockitoBean private TaskService service;
   @MockitoBean private ExportService exports;
   @MockitoBean private LlmCostService costs;
+  @MockitoBean private TaskEventStream events;
+  @MockitoBean private ChunkedUploadService uploads;
 
   @Test
   void returnsUnauthorizedWithTraceIdForMissingToken() throws Exception {
@@ -123,6 +128,24 @@ class ApiErrorResponseTest {
     JsonNode body = body(result);
     assertEquals("NOT_FOUND", body.path("code").asText());
     assertTraceIdConsistent(result, body);
+  }
+
+  @Test
+  void allowsCrossOriginChunkUploadWithPut() throws Exception {
+    // 浏览器对同源的写请求同样会带 Origin 头，一旦 PUT 不在 CORS 方法白名单里就会被判成
+    // 「Invalid CORS request」返回 403（分片上传因此整体失败），所以这里固定住「带 Origin 的 PUT 必须放行」。
+    when(uploads.putChunk(eq("upload-1"), eq("user-a"), eq(0), any(byte[].class)))
+        .thenReturn(new ChunkedUploadService.Session("upload-1", "clip.mp4", 4, 5, List.of(0)));
+
+    mvc.perform(
+            put("/api/tasks/uploads/upload-1/chunks/0")
+                .header(HttpHeaders.AUTHORIZATION, bearer("user-a"))
+                .header(HttpHeaders.ORIGIN, "http://127.0.0.1:5174")
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .content(new byte[] {1, 2, 3, 4}))
+        .andExpect(status().isOk())
+        .andExpect(
+            header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, "http://127.0.0.1:5174"));
   }
 
   @Test

@@ -60,7 +60,7 @@ class TaskPaginationTest {
           lease_expires_at timestamp(3)
         )
         """);
-    repository = new TaskRepository(jdbc, new ObjectMapper());
+    repository = new TaskRepository(jdbc, new ObjectMapper(), new TaskEventStream(jdbc));
     TaskQueue queue = Mockito.mock(TaskQueue.class);
     WorkbenchMetrics metrics = new WorkbenchMetrics(new SimpleMeterRegistry());
     service =

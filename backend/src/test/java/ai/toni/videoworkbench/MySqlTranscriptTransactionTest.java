@@ -59,7 +59,7 @@ class MySqlTranscriptTransactionTest {
         assertEquals(1, segments.size());
         assertEquals("原始片段", segments.getFirst().text());
       } finally {
-        tasks.delete(id);
+        tasks.delete(id, owner);
         jdbc.update("delete from users where id=?", owner);
       }
     }
@@ -121,7 +121,7 @@ class MySqlTranscriptTransactionTest {
 
     @Bean
     TaskRepository taskRepository(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
-      return new TaskRepository(jdbcTemplate, objectMapper);
+      return new TaskRepository(jdbcTemplate, objectMapper, new TaskEventStream(jdbcTemplate));
     }
   }
 }

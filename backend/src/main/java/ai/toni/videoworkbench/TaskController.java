@@ -14,12 +14,15 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api/tasks")
@@ -30,12 +33,65 @@ class TaskController {
   private final TaskService service;
   private final ExportService exports;
   private final LlmCostService costs;
+  private final TaskEventStream events;
+  private final ChunkedUploadService uploads;
 
-  TaskController(TaskService service, ExportService exports, LlmCostService costs) {
+  TaskController(
+      TaskService service,
+      ExportService exports,
+      LlmCostService costs,
+      TaskEventStream events,
+      ChunkedUploadService uploads) {
     this.service = service;
     this.exports = exports;
     this.costs = costs;
+    this.events = events;
+    this.uploads = uploads;
   }
+
+  /**
+   * 任务变化推送（SSE）。EventSource 不能自定义请求头，所以和视频流一样用 {@code access_token} 查询参数带令牌。
+   *
+   * <p>推送只带任务号，客户端收到后按已鉴权的接口重新取数，因此这里不需要（也不应该）把整行数据塞进推送通道。
+   */
+  @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+  SseEmitter stream(@AuthenticationPrincipal AuthenticatedUser user) {
+    return events.subscribe(user.id());
+  }
+
+  /** 建立或继续一次分片上传；同一文件重选会拿到同一个 uploadId 与已收分片列表，从而实现断点续传。 */
+  @PostMapping("/uploads")
+  ChunkedUploadService.Session beginUpload(
+      @RequestBody UploadInit request, @AuthenticationPrincipal AuthenticatedUser user) {
+    return uploads.init(request.fileName(), request.sizeBytes(), user.id());
+  }
+
+  @GetMapping("/uploads/{uploadId}")
+  ChunkedUploadService.Session uploadStatus(
+      @PathVariable String uploadId, @AuthenticationPrincipal AuthenticatedUser user) {
+    return uploads.status(uploadId, user.id());
+  }
+
+  /** 分片以原始字节直接提交（不是 multipart），省掉一层封装开销。 */
+  @PutMapping(
+      value = "/uploads/{uploadId}/chunks/{index}",
+      consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+  ChunkedUploadService.Session uploadChunk(
+      @PathVariable String uploadId,
+      @PathVariable int index,
+      @RequestBody byte[] body,
+      @AuthenticationPrincipal AuthenticatedUser user) {
+    return uploads.putChunk(uploadId, user.id(), index, body);
+  }
+
+  @PostMapping("/uploads/{uploadId}/complete")
+  VideoTask completeUpload(
+      @PathVariable String uploadId, @AuthenticationPrincipal AuthenticatedUser user) {
+    return uploads.complete(uploadId, user.id());
+  }
+
+  /** 分片上传的初始化参数：先声明文件名与总大小，服务端据此算出分片数与 uploadId。 */
+  record UploadInit(String fileName, long sizeBytes) {}
 
   @GetMapping
   TaskPage list(
