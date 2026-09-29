@@ -7,6 +7,9 @@ import path from 'node:path'
 const baseUrl = process.env.GRAFANA_URL ?? 'http://127.0.0.1:3000'
 const user = process.env.GRAFANA_ADMIN_USER ?? 'admin'
 const password = process.env.GRAFANA_ADMIN_PASSWORD ?? 'workbench'
+// 压测这类短窗口证据只看最近几十分钟，默认的 6 小时会把尖峰压平。
+const rangeFrom = process.env.GRAFANA_RANGE_FROM ?? 'now-6h'
+const rangeTo = process.env.GRAFANA_RANGE_TO ?? 'now'
 const outputDir = path.resolve('docs')
 const outputPath = path.join(outputDir, process.argv[2] ?? '可观测性面板.png')
 
@@ -30,7 +33,7 @@ try {
     timeout: 30000
   })
   await page.goto(
-    `${baseUrl}/d/workbench-observability/?from=now-6h&to=now&kiosk`,
+    `${baseUrl}/d/workbench-observability/?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}&kiosk`,
     { waitUntil: 'networkidle' }
   )
   // 等到面板标题渲染出来，再留一点时间给查询与绘制，避免截到空白图。

@@ -31,6 +31,11 @@ management:
   metrics:
     tags:
       application: video-workbench
+    # 压测要看服务端侧的 p95/p99，而默认的 Timer 只导出 _count/_sum/_max，没有 _bucket，
+    # histogram_quantile 会返回空。自定义指标在代码里用 publishPercentileHistogram() 打开。
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
 # 下游容错：并发隔板（本地快速拒绝）+ 熔断器（下游持续失败时不再真的发请求）。
 # 重试与超时不在这里配：重试归模型降级链与队列退避，超时归 HTTP 客户端的每请求 timeout，理由见 DownstreamResilience。
 resilience4j:

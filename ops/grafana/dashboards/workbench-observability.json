@@ -648,6 +648,223 @@
           "legendFormat": "阈值 50%"
         }
       ]
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "接口容量（压测，P3-2）",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "panels": []
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "HTTP 请求速率（按接口）",
+      "description": "来自 micrometer 的 http.server.requests（不含 actuator 抓取本身）。k6 压测期间的到达速率应与 k6 的 arrivals 一致，用来确认「接口真的收到了这些请求」。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 33 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "lineInterpolation": "smooth"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "sum by (uri) (rate(http_server_requests_seconds_count{uri!~\"/actuator.*\"}[1m]))",
+          "legendFormat": "{{uri}}"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "HTTP 延迟 P95 / P99（按接口）",
+      "description": "服务端观测到的延迟分位（含排队与处理）。与 k6 客户端统计对照可以看出差值是否来自网络与容器端口映射。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 33 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "lineInterpolation": "smooth"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, uri) (rate(http_server_requests_seconds_bucket{uri!~\"/actuator.*\"}[5m])))",
+          "legendFormat": "{{uri}} P95"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le, uri) (rate(http_server_requests_seconds_bucket{uri!~\"/actuator.*\"}[5m])))",
+          "legendFormat": "{{uri}} P99"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "数据库连接池（活跃 / 空闲 / 等待）",
+      "description": "HikariCP。等待（pending）一旦持续大于 0 说明请求在抢连接，是接口层最先暴露的瓶颈；上限是 10。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 33 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "lineInterpolation": "smooth"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "hikaricp_connections_active",
+          "legendFormat": "活跃"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "hikaricp_connections_pending",
+          "legendFormat": "等待"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "hikaricp_connections_idle",
+          "legendFormat": "空闲"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "hikaricp_connections_max",
+          "legendFormat": "上限"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "后端进程 CPU 与 JVM 堆",
+      "description": "进程 CPU 用 JVM 自己的读数（容器限额内），堆内存用来判断压力来自 CPU 还是对象分配。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "lineInterpolation": "smooth"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "JVM 堆" },
+            "properties": [
+              { "id": "unit", "value": "bytes" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "process_cpu_usage",
+          "legendFormat": "进程 CPU"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "sum(jvm_memory_used_bytes{area=\"heap\"})",
+          "legendFormat": "JVM 堆"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "任务队列积压（压测期间）",
+      "description": "上传速率超过转写吞吐时，积压会线性增长——这条线是「接收能力远大于处理能力」的直接证据。",
+      "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "showPoints": "auto",
+            "lineInterpolation": "stepAfter"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "workbench_queue_depth",
+          "legendFormat": "排队中"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "workbench-prometheus" },
+          "expr": "sum(rate(workbench_queue_wait_seconds_count[5m]))",
+          "legendFormat": "出队速率（个/秒）"
+        }
+      ]
     }
   ]
 }

@@ -18,6 +18,10 @@ __pycache__/
 .mvn/wrapper/apache-maven/
 .mvn/wrapper/maven.zip
 
+# 压测输入与被压出来的结果都由本地生成/产生，不入库（生成命令见 ops/k6/*.js 顶部注释）
+ops/k6/fixtures/
+ops/k6/results/
+
 guava*.jar
 frame-*.png
 player-detail.png
