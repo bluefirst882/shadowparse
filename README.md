@@ -112,15 +112,25 @@ FFmpeg 由 `ProcessBuilder` 托管：
 - **超时强杀**：超过配置时限自动 `destroyForcibly`
 - **退出码诊断**：失败时截取 stderr 尾部作为错误信息回传前端
 
-Whisper 推理改为独立运行的常驻 HTTP 服务（`workers/whisper_worker.py --serve`，
-默认跑在宿主机 GPU 上），后端只通过 HTTP 调用它：
+Whisper 推理是独立运行的常驻 HTTP 服务（`workers/whisper_worker.py --serve`），后端只通过 HTTP 调用它；
+它现在跑在 compose 的 `whisper` 容器里，不再依赖宿主机上手工维护的 Python venv：
 
+- **进程不再「悄悄死掉」**：容器退出由 `restart: unless-stopped` 拉起，健康检查打 `GET /health`；
+  由于模型是在绑定端口**之前**加载的，`healthy` 的含义是「设备就绪且模型已加载」，
+  而不只是「端口还活着」。宿主机 venv 时代那种后端报 `ConnectException` 的情况，现在对应一次自动重启。
+- **镜像与模型分离**：镜像只装 Python + torch + whisper，模型权重靠挂载复用
+  （默认 `./models/whisper`，可用 `WHISPER_MODELS_DIR` 指向已有缓存目录），不为 1.6GB 权重打包镜像；
+  目录为空时首次启动会在容器内下载 `turbo` 权重。
+- **CPU 兜底、GPU 可选**：默认装 CPU 版 torch，镜像不依赖 NVIDIA 容器运行时，`/health` 会如实返回
+  `device=cpu`；要 GPU 就用 `--build-arg` 换成 CUDA 版 torch 再给容器加 GPU 预留（见 `workers/Dockerfile` 顶部注释）。
+- **转写串行**：`/transcribe` 在 worker 内用锁串行执行。容器化之前实测两个后端实例同时向同一个 GPU 发转写，
+  直接 `CUDA out of memory` 返回 500；现在并发请求排队，而不是互相抢显存（CPU 下也避免互相抢核）。
 - **调用鉴权**：请求头携带 `X-Whisper-Token`，与后端共享密钥；服务启动时强制要求该密钥
   至少 32 字符，避免本机其他进程随意调用
-- **设备自述**：`GET /health` 返回当前推理设备（`cuda` / `cpu`），便于确认是否退化到 CPU
+- **设备自述**：`GET /health` 返回当前推理设备（`cuda` / `cpu`）与模型名，便于确认是否退化到 CPU
 - **输入边界**：按 `Content-Length` 分块落盘并限制体积，超限返回 `413`；转写结束后删除临时音频
-- 当前实现**每次请求都会重新加载模型**，常驻服务省掉的是进程启动开销而非模型加载开销，
-  这是已知的优化点
+- **模型只加载一次**：按 `(模型名, 设备)` 缓存已加载的权重，去掉「每个请求重新加载模型」的开销；
+  模型文件缺失或损坏会在启动阶段就失败并暴露出来，而不是每次转写都返回 500
 
 ### 3. LLM 结构化输出与可信校验
 
@@ -299,12 +309,14 @@ Whisper 侧的时间证据更直观：真实失败要等满 **10s** 连接超时
 │           ├── schemas/                  # JSON Schema 正文（Java 服务端与 Node 评测脚本共用）
 │           └── db/migration/             # Flyway 迁移脚本
 ├── frontend/                        # Vue 3 + TypeScript 工作台界面
-├── workers/whisper_worker.py        # Whisper 推理服务（HTTP，/transcribe 与 /health）
+├── workers/                         # Whisper 推理服务
+│   ├── Dockerfile                        # 服务镜像：默认 CPU 版 torch，可用 build args 换 CUDA
+│   └── whisper_worker.py                 # HTTP 服务（/transcribe 与 /health），转写串行 + 模型缓存
 ├── ops/                             # 可观测性栈配置
 │   ├── prometheus/prometheus.yml         # 抓取 backend:8080/actuator/prometheus
 │   └── grafana/                          # 数据源与面板 provisioning（含面板 JSON）
 ├── docs/                            # 需求说明、编码规范、验收记录、面板截图
-└── compose.yaml                     # MySQL / RabbitMQ / 后端 / 前端 / Prometheus / Grafana
+└── compose.yaml                     # Whisper / MySQL / RabbitMQ / 后端 / 前端 / Prometheus / Grafana
 ```
 
 ---
@@ -477,7 +489,7 @@ Compose 默认将容器 MySQL 映射到宿主机 `3307`，避免与其他项目�
 
 MySQL 用户和密码只会在空数据卷首次初始化时创建。如果已有旧卷是用其他账号初始化的，请先备份数据，再执行 `docker compose down --volumes` 后重新初始化，或进入 MySQL 手动创建 `.env` 中的 `MYSQL_USER` 并授权；不要为了测试随意删除包含重要视频/数据库的卷。
 
-工作台访问 `http://localhost:5174`，后端访问 `http://localhost:8081`，Prometheus 访问 `http://localhost:9090`，Grafana 访问 `http://localhost:3000`，RabbitMQ 管理台访问 `http://localhost:15672`。Compose 会启动 Nginx 前端、Spring Boot 后端、MySQL 8.4、RabbitMQ 4 以及 Prometheus / Grafana 可观测性栈；Windows 上的 Whisper worker 由 `start-all.ps1` 在宿主机运行，使 PyTorch 能直接使用宿主机 NVIDIA GPU。音视频保存在 `video-storage` 命名卷，MySQL 数据保存在 `mysql-data` 命名卷，队列消息保存在 `rabbitmq-data` 命名卷，Prometheus / Grafana 数据分别保存在 `prometheus-data`、`grafana-data` 命名卷；模型缓存在 `WHISPER_MODEL_DIR` 指定的宿主机目录。端口可通过 `BACKEND_HOST_PORT`、`FRONTEND_HOST_PORT`、`PROMETHEUS_HOST_PORT`、`GRAFANA_HOST_PORT`、`RABBITMQ_HOST_PORT` 和 `RABBITMQ_MANAGEMENT_HOST_PORT` 修改。
+工作台访问 `http://localhost:5174`，后端访问 `http://localhost:8081`，Prometheus 访问 `http://localhost:9090`，Grafana 访问 `http://localhost:3000`，RabbitMQ 管理台访问 `http://localhost:15672`。Compose 会启动 Nginx 前端、Spring Boot 后端、MySQL 8.4、RabbitMQ 4、Whisper 转写服务以及 Prometheus / Grafana 可观测性栈；Whisper 也在容器里（默认 CPU 推理），端口映射到宿主机 `8090`。音视频保存在 `video-storage` 命名卷，MySQL 数据保存在 `mysql-data` 命名卷，队列消息保存在 `rabbitmq-data` 命名卷，Prometheus / Grafana 数据分别保存在 `prometheus-data`、`grafana-data` 命名卷；模型缓存在 `WHISPER_MODELS_DIR` 指定的宿主机目录（挂载进容器，不打进镜像）。端口可通过 `BACKEND_HOST_PORT`、`FRONTEND_HOST_PORT`、`WHISPER_HOST_PORT`、`PROMETHEUS_HOST_PORT`、`GRAFANA_HOST_PORT`、`RABBITMQ_HOST_PORT` 和 `RABBITMQ_MANAGEMENT_HOST_PORT` 修改。
 
 停止容器但保留视频、模型和数据库：
 
@@ -502,10 +514,11 @@ docker builder prune -f
 
 ### 环境要求
 
-- Java 21、Node.js 20+、Python 3.11+
+- Docker（含 Compose v2）：Whisper 转写服务也在 compose 里，全栈一条命令起完
+- Java 21、Node.js 20+（本机构建或直接跑后端/前端时需要）
 - MySQL 8.0+、RabbitMQ 4（或直接用 `compose.yaml` 起这两个依赖）
-- FFmpeg（需在 `PATH` 中，或通过 `FFMPEG_PATH` 指定）
-- 本地 Whisper：`pip install openai-whisper`
+- FFmpeg（容器内已装；仅在本机直接跑后端时才需要，可用 `FFMPEG_PATH` 指定）
+- 本机 GPU 不是必需项：默认镜像跑 CPU，`/health` 会如实报告实际设备
 
 ### 1. 配置
 
@@ -521,17 +534,14 @@ cp .env.example .env
 种子账号 `demo`（密码 `demo1234`，仅本地开发用），用于查看鉴权上线前的历史任务，
 登录后请按需修改或改用自建账号。
 
-Windows 宿主机首次配置独立的 Python 3.11 GPU 环境：
+Whisper 权重不打进镜像，挂载一个模型目录即可（已有缓存就直接指过去，省掉 1.6GB 重复下载）：
 
-```powershell
-py -3.11 -m venv E:\model\toni-whisper-venv
-E:\model\toni-whisper-venv\Scripts\python.exe -m pip install --upgrade pip
-E:\model\toni-whisper-venv\Scripts\pip.exe install torch==2.5.1+cu124 --index-url https://download.pytorch.org/whl/cu124
-E:\model\toni-whisper-venv\Scripts\pip.exe install -r workers\requirements.txt
+```properties
+WHISPER_MODELS_DIR=E:/model/whisper
 ```
 
-默认模型目录为 `E:\model\whisper`。可用 `WHISPER_VENV`、
-`WHISPER_MODEL_DIR` 修改位置，并用 `nvidia-smi` 检查驱动与显卡。
+不设置时默认用仓库内的 `models/whisper`。目录里没有 `large-v3-turbo.pt` 时，
+`whisper` 容器会在首次启动时把权重下载到该目录，`docker compose logs -f whisper` 可以看到进度。
 
 ### 2. 启动全部服务
 
@@ -539,9 +549,11 @@ E:\model\toni-whisper-venv\Scripts\pip.exe install -r workers\requirements.txt
 ./start-all.ps1
 ```
 
-脚本启动宿主机 Whisper worker 并等待健康检查，再构建、启动 Compose 中的
-Java 后端、前端和 MySQL。前端地址为 `http://localhost:5174`，后端为
-`http://localhost:8081`。停止使用 `./stop-all.ps1`；不会删除模型或数据卷。
+脚本构建并启动 Compose 中的全部服务（Whisper、MySQL、RabbitMQ、Java 后端、前端、Prometheus、Grafana）。
+后端会等到 Whisper 的 `/health` 通过（即模型加载完成）再启动，避免启动窗口里的任务白白消耗重试额度。
+前端地址为 `http://localhost:5174`，后端为 `http://localhost:8081`，
+Whisper 的设备信息可以用 `curl http://127.0.0.1:8090/health` 查看。
+停止使用 `./stop-all.ps1`；不会删除模型或数据卷。
 
 ### 5. 运行测试与校验
 
@@ -574,9 +586,11 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | `WORKBENCH_LEASE_HEARTBEAT_MILLIS`  | 20000                              | 续租心跳间隔（毫秒），必须明显小于租约时长，否则自己的任务会被自己回收 |
 | `WORKBENCH_LEASE_SWEEP_MILLIS`      | 30000                              | 过期租约巡检间隔（毫秒）。回收最坏延迟 ≈ 租约时长 + 巡检间隔       |
 | `FFMPEG_PATH`                       | `ffmpeg`                           | FFmpeg 可执行文件路径                              |
-| `WHISPER_MODEL`                     | `turbo`                            | Whisper 模型规格                                   |
-| `WHISPER_SERVICE_URL`               | `http://host.docker.internal:8090` | 宿主机 Whisper 服务地址                            |
-| `WHISPER_MODEL_DIR`                 | `E:/model/whisper`                 | 宿主机模型缓存目录                                 |
+| `WHISPER_MODEL`                     | `turbo`                            | Whisper 模型规格，`whisper` 容器启动时加载          |
+| `WHISPER_SERVICE_URL`               | `http://whisper:8090`              | 后端访问的 Whisper 地址（compose 内用服务名）      |
+| `WHISPER_MODELS_DIR`                | `./models/whisper`                 | 宿主机模型缓存目录，挂载到容器 `/models`           |
+| `WHISPER_HOST_PORT`                 | 8090                               | `whisper` 服务映射到宿主机的端口，`/health` 可查设备 |
+| `WHISPER_CPU_THREADS`               | 4                                  | 容器内 CPU 推理线程数（`OMP_NUM_THREADS`）         |
 | `WORKBENCH_JWT_SECRET`              | 无（必填）                         | JWT 签名密钥，至少 32 字符，需自行随机生成         |
 | `WORKBENCH_TOKEN_TTL_HOURS`         | 24                                 | 令牌有效期（小时）                                 |
 | `LLM_API_KEY`                       | 空                                 | 云端 LLM 密钥，留空则跳过摘要阶段                  |
@@ -588,7 +602,7 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | `WORKBENCH_LLM_TIMEOUT_SECONDS`     | 90                                 | 摘要/合并单次 LLM 请求的超时（秒），由 `HttpRequest.timeout` 强制 |
 | `WORKBENCH_LLM_TRANSLATE_TIMEOUT_SECONDS` | 180                          | 翻译单次 LLM 请求的超时（秒）；翻译输出比输入长，给更宽的上限 |
 | `WORKBENCH_LLM_MAX_CONCURRENT`      | 4                                  | LLM 并发隔板容量，超出直接拒绝（不排队）；置 0 会让所有 LLM 调用立即被拒 |
-| `WORKBENCH_WHISPER_MAX_CONCURRENT`  | 1                                  | Whisper 并发隔板容量，默认串行；本机 GPU 同时跑多个转写只会互相拖慢 |
+| `WORKBENCH_WHISPER_MAX_CONCURRENT`  | 1                                  | Whisper 并发隔板容量，默认串行；worker 内部还会对 `/transcribe` 加锁，同时跑多个转写只会互相拖慢甚至 OOM |
 | `PROMETHEUS_HOST_PORT`              | 9090                               | Prometheus 映射到宿主机的端口                      |
 | `GRAFANA_HOST_PORT`                 | 3000                               | Grafana 映射到宿主机的端口                         |
 | `GRAFANA_ADMIN_USER`                | `admin`                            | Grafana 管理员账号                                 |
@@ -596,10 +610,11 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 
 > 密钥仅由后端读取，不会写入日志、前端响应或导出文件。
 
-Docker 不包含 Python、PyTorch、Whisper，也不申请容器 GPU。宿主机 worker
-在 CUDA 可用时使用 NVIDIA GPU，否则回退 CPU。后端通过
-`host.docker.internal:8090` 上传提取后的 WAV 音频，接口由
-`WHISPER_SERVICE_TOKEN` 保护。模型保存在宿主机 `WHISPER_MODEL_DIR`。
+后端把提取好的 16kHz 单声道 WAV 上传到 compose 内的 `whisper:8090`，接口由 `WHISPER_SERVICE_TOKEN` 保护，
+模型权重从宿主机目录挂载进来（`WHISPER_MODELS_DIR`）。镜像默认装 CPU 版 PyTorch，
+所以 `/health` 返回 `device=cpu`；要 GPU 需自行用 `workers/Dockerfile` 顶部的 build args 重建为
+CUDA 版 torch，并给服务加 GPU 预留（**默认不申请容器 GPU**：本机的 Docker Desktop 未必装了
+nvidia-container-toolkit，装不上时容器会直接起不来，那种情况下退化成宿主机进程反而更稳）。
 若首次下载因网络中断留下不完整的 `.pt` 文件，重试会重新校验并下载该模型；不要将未完成的文件当作已缓存模型。
 
 ---
@@ -694,6 +709,27 @@ Prometheus 目标 `video-workbench-backend` 为 `up`，Grafana 面板与数据�
   若持有者其实还活着（网络分区）仍可能造成**一次重复执行**，彻底消除需要 fencing token，**未实现**；
   三是 `workbench_task_lease_reclaims_total` 与其它计数器一样按需注册，只有发生过回收才出现在
   `/actuator/prometheus`，且随进程重启清零。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
+Whisper 容器化（P3-1）同样在容器环境实测（验收标准：杀掉容器能自愈、`/health` 暴露 device）：
+Whisper 不再跑在宿主机 Python 进程里，而是 compose 里的 `whisper` 服务（`python:3.12-slim` + `ffmpeg` + **CPU 版** `torch`，
+镜像 2.22 GB，已加载模型 1617941637 字节从 bind mount 的 `/models` 读取、不打进镜像），配 `healthcheck` 打 `/health`
+与 `restart: unless-stopped`；后端 `depends_on: whisper: service_healthy`，等模型加载完再启动。
+
+- **`/health` 暴露 device**：`curl http://127.0.0.1:8090/health` 返回 `{"status":"ok","device":"cpu","model":"turbo"}`。
+  进程在**绑定端口前**就把模型加载完（日志顺序为 `Whisper model ready: turbo on cpu` → `Whisper service listening on ...`），
+  所以 `/health` 为 `ok` 代表「设备可用且模型已就绪」，而不只是「端口还活着」——这正是原先宿主机进程"悄悄死掉、
+  后端只看到 ConnectException"要避免的状态。
+- **转写串行保护**：worker 对 `/transcribe` 加进程内锁。两个并发的 40 秒样本请求实测分别耗时 **32.8 s** 与 **64.8 s**
+  （第二个在执行阶段排队等待，总墙钟 65.2 s），即 GPU 并发导致的 `CUDA out of memory` 500 不再出现。
+- **杀掉容器能自愈**：从祖先 PID 命名空间发 SIGKILL 后 `RestartCount` 由 0 变 **1**，容器 +4 s 进入 `starting`、
+  **+35 s** 回到 `healthy`，无需人工干预。
+- **端到端真实视频**：134.167 s 视频上传后 `+10 s TRANSCRIPTION 45%` → `+110 s SUMMARY 85%` →
+  **`+130 s` 达到 `COMPLETED/COMPLETED`**，105 个片段（0→134040 ms）、445 字摘要、7 条要点、9 个章节，
+  容器日志同步出现 `13414/13414 frames [01:45, 127.12frames/s]`；`verify` 135 项通过。
+- 如实记录三点边界：一是本次是 **CPU 路径**，32.8 s / 64.8 s 与早前 GPU 样本不可直接比较，只用作「串行 vs 并发」的相对证据；
+  二是 **GPU 路径未实测**（本机 Docker Desktop 未装 nvidia-container-toolkit），Dockerfile 已用 build args 预留 CUDA 构建入口；
+  三是 `docker kill` / `docker stop` 属**显式停止**，Docker 语义下不会触发 `unless-stopped` 重启，
+  自愈证据是用祖先命名空间 SIGKILL 模拟的真实崩溃。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 
 ---
 
