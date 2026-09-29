@@ -4,6 +4,8 @@
     "screenshot": "node screenshot.mjs",
     "screenshot:workbench": "node frontend-screenshot.mjs",
     "screenshot:grafana": "node grafana-screenshot.mjs",
+    "verify:realtime-upload": "node verify-realtime-upload.mjs",
+    "verify:sse": "node tools/sse-latency.mjs",
     "format:check": "prettier --check .",
     "format:write": "prettier --write .",
     "check:python": "D:\\program\\anaconda\\python.exe -m py_compile workers/whisper_worker.py",
