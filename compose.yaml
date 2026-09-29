@@ -10,7 +10,9 @@ services:
       MYSQL_USERNAME: ${MYSQL_USER:-video_workbench}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
       WORKBENCH_STORAGE_DIR: /app/storage
-      WHISPER_SERVICE_URL: ${WHISPER_SERVICE_URL:-http://host.docker.internal:8090}
+      # 默认指向 compose 内的 whisper 服务（容器化后不再依赖宿主机上手工起的 Python worker）。
+      # 想改用宿主机 GPU 进程时，把 WHISPER_SERVICE_URL 覆盖成 http://host.docker.internal:8090。
+      WHISPER_SERVICE_URL: ${WHISPER_SERVICE_URL:-http://whisper:8090}
       WHISPER_SERVICE_TOKEN: ${WHISPER_SERVICE_TOKEN:?请在 .env 中设置 WHISPER_SERVICE_TOKEN}
       WHISPER_MODEL: ${WHISPER_MODEL:-turbo}
       WORKBENCH_JWT_SECRET: ${WORKBENCH_JWT_SECRET:?请在 .env 中设置 WORKBENCH_JWT_SECRET}
@@ -49,6 +51,10 @@ services:
       mysql:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      # 等到模型真正加载完（/health 为 ok）再起后端：否则首批任务会在启动窗口里
+      # 拿到「Whisper 服务不可达」而白白消耗重试额度。
+      whisper:
         condition: service_healthy
     healthcheck:
       test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:8080/actuator/health']
@@ -158,6 +164,35 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+  # Whisper 转写服务：容器化托管，进程死掉由 restart 策略拉起来（见 README「Whisper 容器化」）。
+  whisper:
+    build:
+      context: .
+      dockerfile: workers/Dockerfile
+    environment:
+      WHISPER_SERVICE_TOKEN: ${WHISPER_SERVICE_TOKEN:?请在 .env 中设置 WHISPER_SERVICE_TOKEN}
+      WHISPER_MODEL: ${WHISPER_MODEL:-turbo}
+      # 模型挂载进容器；容器内不再有「模型目录」这一层配置。
+      WHISPER_MODEL_DIR: /models
+      WHISPER_PORT: '8090'
+      WHISPER_MAX_UPLOAD_BYTES: ${WHISPER_MAX_UPLOAD_BYTES:-2147483648}
+      # 转写在 worker 内串行执行（见 whisper_worker.py），CPU 线程数直接决定单次转写耗时。
+      OMP_NUM_THREADS: ${WHISPER_CPU_THREADS:-4}
+    volumes:
+      # 复用宿主机已有模型缓存；目录为空时容器会在首次启动时把模型下载到这里（约 1.6GB）。
+      - ${WHISPER_MODELS_DIR:-./models/whisper}:/models
+    ports:
+      - "${WHISPER_HOST_PORT:-8090}:8090"
+    healthcheck:
+      # /health 在模型加载完成后才可用，所以 healthy 表示「设备就绪且模型已加载」，不只是端口活着。
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:8090/health']
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      # 首次启动要加载 1.6GB 权重（必要时还要先下载），给足冷启动时间。
+      start_period: 120s
+    restart: unless-stopped
+
 volumes:
   video-storage:
   mysql-data:
