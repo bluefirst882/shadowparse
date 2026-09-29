@@ -16,6 +16,7 @@ const tasks = ref<Task[]>([]),
   selected = ref<Details>(),
   loading = ref(false),
   uploading = ref(false),
+  uploadPercent = ref(0),
   message = ref(''),
   query = ref(''),
   transcriptQuery = ref(''),
@@ -107,7 +108,7 @@ async function submitAuth() {
     authed.value = true
     form.password = ''
     await refresh()
-    startPolling()
+    startStream()
   } catch (error) {
     authError.value = authMessage(error)
   } finally {
@@ -138,7 +139,7 @@ function signOut(reason = '') {
   nextCursor.value = null
   selected.value = undefined
   authError.value = reason
-  stopPolling()
+  stopStream()
 }
 function switchAuthMode() {
   registerMode.value = !registerMode.value
@@ -151,8 +152,12 @@ async function choose(file: File) {
     return false
   }
   uploading.value = true
+  uploadPercent.value = 0
   try {
-    await api.upload(file)
+    await api.upload(file, (sent) => {
+      uploadPercent.value = Math.min(99, Math.round((sent / file.size) * 100))
+    })
+    uploadPercent.value = 100
     message.value = '视频已加入本地处理队列。'
     await refresh()
   } catch (error) {
@@ -208,14 +213,34 @@ function removeTask(task: Task) {
   if (window.confirm(`确定删除“${task.fileName}”及其本地文件吗？`))
     return action(task, 'remove')
 }
-let timer: number | undefined
-function startPolling() {
-  stopPolling()
-  timer = window.setInterval(refresh, 3000)
+let stream: EventSource | undefined
+let refreshTimer: number | undefined
+// 一次状态变化会在后端连着写几行（状态、阶段、进度各一次），这里合并成一个刷新请求。
+function scheduleRefresh() {
+  if (refreshTimer !== undefined) return
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = undefined
+    void refresh()
+  }, 120)
 }
-function stopPolling() {
-  if (timer !== undefined) window.clearInterval(timer)
-  timer = undefined
+function startStream() {
+  stopStream()
+  if (!token.get()) return
+  stream = new EventSource(api.streamUrl())
+  // 断线重连期间的事件会丢，所以每次连上（含自动重连成功）都补刷一次。
+  stream.onopen = scheduleRefresh
+  stream.addEventListener('tasks', scheduleRefresh)
+  stream.onerror = () => {
+    // EventSource 会自己重连，但令牌过期这类错误重连多少次都没用。用一次普通请求探一下：
+    // 401 走登录过期处理并断开，其它错误（后端没起来）由 refresh 给出提示。
+    void refresh()
+  }
+}
+function stopStream() {
+  stream?.close()
+  stream = undefined
+  if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+  refreshTimer = undefined
 }
 onMounted(async () => {
   const saved = localStorage.getItem('video-workbench-theme')
@@ -226,9 +251,9 @@ onMounted(async () => {
   )
   if (!authed.value) return
   await refresh()
-  startPolling()
+  startStream()
 })
-onUnmounted(stopPolling)
+onUnmounted(stopStream)
 </script>
 <template>
   <el-container class="shell"
@@ -283,14 +308,28 @@ onUnmounted(stopPolling)
               >视频与音频仅保存在本机；内容生成阶段只发送必要的转写文本。</span
             >
           </div>
-          <el-upload
-            :show-file-list="false"
-            :before-upload="choose"
-            accept="video/*,.mp4,.mov,.mkv,.webm,.avi"
-            ><el-button type="primary" :loading="uploading" :icon="UploadFilled"
-              >导入视频</el-button
-            ></el-upload
-          >
+          <div class="uploader">
+            <el-upload
+              :show-file-list="false"
+              :before-upload="choose"
+              accept="video/*,.mp4,.mov,.mkv,.webm,.avi"
+              ><el-button
+                type="primary"
+                :loading="uploading"
+                :icon="UploadFilled"
+                >导入视频</el-button
+              ></el-upload
+            >
+            <template v-if="uploading"
+              ><el-progress
+                :percentage="uploadPercent"
+                :stroke-width="6"
+                :show-text="false"
+              /><small
+                >上传中 {{ uploadPercent }}%（中断后重选同一文件可续传）</small
+              ></template
+            >
+          </div>
         </section>
         <el-alert
           v-if="message"

@@ -151,6 +151,18 @@ body {
 small {
   color: #66727f;
 }
+.uploader {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+/* 进度条自身没有宽度（Element Plus 靠父容器撑开），在按内容定宽的网格项里会塌成 0 宽而看不见。 */
+.uploader .el-progress {
+  width: 220px;
+}
+.uploader small {
+  font-size: 12px;
+}
 .el-alert {
   margin-bottom: 16px;
 }
