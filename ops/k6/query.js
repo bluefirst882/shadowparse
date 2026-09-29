@@ -19,7 +19,10 @@ export const options = {
       stages: (__ENV.READ_TARGETS || '40,80,120,120')
         .split(',')
         .map(Number)
-        .map((target) => ({ target, duration: __ENV.READ_STAGE_DURATION || '30s' }))
+        .map((target) => ({
+          target,
+          duration: __ENV.READ_STAGE_DURATION || '30s'
+        }))
     }
   },
   thresholds: {
@@ -28,7 +31,16 @@ export const options = {
     'http_req_duration{name:detail}': ['p(95)<300'],
     'http_req_duration{name:details}': ['p(95)<800']
   },
-  summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max', 'count']
+  summaryTrendStats: [
+    'avg',
+    'min',
+    'med',
+    'p(90)',
+    'p(95)',
+    'p(99)',
+    'max',
+    'count'
+  ]
 }
 
 export function setup() {

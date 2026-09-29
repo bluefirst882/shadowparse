@@ -42,9 +42,9 @@ services:
       WORKBENCH_LEASE_HEARTBEAT_MILLIS: ${WORKBENCH_LEASE_HEARTBEAT_MILLIS:-20000}
       WORKBENCH_LEASE_SWEEP_MILLIS: ${WORKBENCH_LEASE_SWEEP_MILLIS:-30000}
     ports:
-      - "${BACKEND_HOST_PORT:-8081}:8080"
+      - '${BACKEND_HOST_PORT:-8081}:8080'
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - 'host.docker.internal:host-gateway'
     volumes:
       - video-storage:/app/storage
     depends_on:
@@ -67,7 +67,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "${FRONTEND_HOST_PORT:-5174}:80"
+      - '${FRONTEND_HOST_PORT:-5174}:80'
     depends_on:
       - backend
     healthcheck:
@@ -81,7 +81,7 @@ services:
   prometheus:
     image: prom/prometheus:v2.55.1
     ports:
-      - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+      - '${PROMETHEUS_HOST_PORT:-9090}:9090'
     volumes:
       - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -98,7 +98,7 @@ services:
   grafana:
     image: grafana/grafana:11.5.1
     ports:
-      - "${GRAFANA_HOST_PORT:-3000}:3000"
+      - '${GRAFANA_HOST_PORT:-3000}:3000'
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-workbench}
@@ -127,8 +127,8 @@ services:
       # 采用「处理完再 ack」的至少一次语义，就必须把 consumer_timeout 放宽，否则长任务会被 broker 反复打断。
       RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '-rabbit consumer_timeout 86400000'
     ports:
-      - "${RABBITMQ_HOST_PORT:-5672}:5672"
-      - "${RABBITMQ_MANAGEMENT_HOST_PORT:-15672}:15672"
+      - '${RABBITMQ_HOST_PORT:-5672}:5672'
+      - '${RABBITMQ_MANAGEMENT_HOST_PORT:-15672}:15672'
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
@@ -182,7 +182,7 @@ services:
       # 复用宿主机已有模型缓存；目录为空时容器会在首次启动时把模型下载到这里（约 1.6GB）。
       - ${WHISPER_MODELS_DIR:-./models/whisper}:/models
     ports:
-      - "${WHISPER_HOST_PORT:-8090}:8090"
+      - '${WHISPER_HOST_PORT:-8090}:8090'
     healthcheck:
       # /health 在模型加载完成后才可用，所以 healthy 表示「设备就绪且模型已加载」，不只是端口活着。
       test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:8090/health']

@@ -42,7 +42,11 @@ export function pick(list) {
 
 // 不引 jslib 的 textSummary：只打印本次关心的几个指标，自己拼更可控。
 export function report(data, extraLines) {
-  const lines = [`${'='.repeat(60)}`, `场景 ${data.state.testRunDurationMs} ms`, '']
+  const lines = [
+    `${'='.repeat(60)}`,
+    `场景 ${data.state.testRunDurationMs} ms`,
+    ''
+  ]
   const wanted = [
     'http_reqs',
     'http_req_failed',

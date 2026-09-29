@@ -72,7 +72,7 @@ resilience4j:
         max-wait-duration: 0
 logging:
   pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] %logger{36} - %msg%n"
+    console: '%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] %logger{36} - %msg%n'
 workbench:
   storage-dir: ${WORKBENCH_STORAGE_DIR:./storage}
   max-upload-bytes: ${WORKBENCH_MAX_UPLOAD_BYTES:21474836480}

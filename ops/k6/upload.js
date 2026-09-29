@@ -32,7 +32,16 @@ export const options = {
     http_req_failed: ['rate<0.01'],
     'http_req_duration{name:upload}': ['p(95)<1000']
   },
-  summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max', 'count']
+  summaryTrendStats: [
+    'avg',
+    'min',
+    'med',
+    'p(90)',
+    'p(95)',
+    'p(99)',
+    'max',
+    'count'
+  ]
 }
 
 export function setup() {
@@ -43,9 +52,14 @@ export default function (data) {
   const response = http.post(
     `${baseUrl}/api/tasks`,
     { file: http.file(sample, 'sample-4s.mp4', 'video/mp4') },
-    { headers: { Authorization: `Bearer ${data.token}` }, tags: { name: 'upload' } }
+    {
+      headers: { Authorization: `Bearer ${data.token}` },
+      tags: { name: 'upload' }
+    }
   )
-  const ok = check(response, { '上传 200 且返回任务 id': (r) => r.status === 200 && !!r.json('id') })
+  const ok = check(response, {
+    '上传 200 且返回任务 id': (r) => r.status === 200 && !!r.json('id')
+  })
   if (ok) created.add(1)
 }
 
