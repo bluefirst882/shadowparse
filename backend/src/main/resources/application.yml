@@ -78,6 +78,15 @@ workbench:
     max-attempts: ${WORKBENCH_QUEUE_MAX_ATTEMPTS:4}
     retry-initial-delay-millis: ${WORKBENCH_QUEUE_RETRY_INITIAL_DELAY_MILLIS:5000}
     retry-multiplier: ${WORKBENCH_QUEUE_RETRY_MULTIPLIER:2}
+  # 多实例认领：任务由「租约持有」而不是「状态即锁」保护，见 TaskLease。
+  # instance-id 留空时用「主机名 + 随机后缀」，因此同一台机器上跑多个实例也能区分持有者；
+  # 生产建议显式配成稳定且唯一的值（如 workbench-a），日志与库里的归属更好读。
+  lease:
+    instance-id: ${WORKBENCH_INSTANCE_ID:}
+    # 租约时长要显著大于心跳间隔：心跳漏一拍不算失联，连续漏掉数拍才允许别人回收。
+    duration-seconds: ${WORKBENCH_LEASE_SECONDS:90}
+    heartbeat-interval-millis: ${WORKBENCH_LEASE_HEARTBEAT_MILLIS:20000}
+    sweep-interval-millis: ${WORKBENCH_LEASE_SWEEP_MILLIS:30000}
   ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
   security:
     jwt-secret: ${WORKBENCH_JWT_SECRET:}

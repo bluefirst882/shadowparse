@@ -30,6 +30,8 @@ class WorkbenchMetrics {
   static final String QUEUE_PUBLISH_FAILURES = "workbench.queue.publish_failures";
   static final String QUEUE_RETRIES = "workbench.queue.retries";
   static final String QUEUE_DEAD_LETTERS = "workbench.queue.dead_letters";
+  static final String TASK_CLAIMS = "workbench.task.claims";
+  static final String LEASE_RECLAIMS = "workbench.task.lease_reclaims";
 
   private final MeterRegistry registry;
 
@@ -136,5 +138,19 @@ class WorkbenchMetrics {
   /** 超过重试上限、被转入死信队列的任务数（需要人工处理的事故计数）。 */
   void recordQueueDeadLetter(String reason) {
     registry.counter(QUEUE_DEAD_LETTERS, "reason", reason).increment();
+  }
+
+  /**
+   * 一次投递的领取结果：{@code claimed} 是真正开始执行，{@code skipped} 是被判为重复投递而丢弃。
+   *
+   * <p>多实例下这就是「有没有重复执行」的直接读数：同一任务无论被投递多少次，只有一次会记成 {@code claimed}。
+   */
+  void recordTaskClaim(boolean claimed) {
+    registry.counter(TASK_CLAIMS, "result", claimed ? "claimed" : "skipped").increment();
+  }
+
+  /** 租约过期被收回重投的任务数：持有者崩溃（而非优雅停机）时才会发生，用于观测失联与恢复。 */
+  void recordLeaseReclaim() {
+    registry.counter(LEASE_RECLAIMS).increment();
   }
 }

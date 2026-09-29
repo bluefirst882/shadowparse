@@ -75,7 +75,7 @@ class TaskServiceTest {
     assertDoesNotThrow(() -> service.process("task-1", 1));
 
     verify(tasks).find("task-1");
-    verify(tasks, never()).claimForProcessing("task-1");
+    verify(tasks, never()).claimForProcessing(any(), any(), any());
   }
 
   /** 重复投递的兜底：只有把任务从 QUEUED 原子改成 PROCESSING 成功的那次投递才会真正执行。 */
@@ -83,11 +83,11 @@ class TaskServiceTest {
   void ignoresDuplicateDeliveryWhenTaskIsAlreadyClaimed() {
     TaskService service = service();
     when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.PROCESSING)));
-    when(tasks.claimForProcessing("task-1")).thenReturn(false);
+    when(tasks.claimForProcessing(eq("task-1"), any(), any())).thenReturn(false);
 
     service.process("task-1", 1);
 
-    verify(tasks).claimForProcessing("task-1");
+    verify(tasks).claimForProcessing(eq("task-1"), any(), any());
     verify(tasks, never()).update(any(), any(), any(), anyInt(), any());
   }
 
@@ -96,11 +96,11 @@ class TaskServiceTest {
   void doesNotReleaseProcessingTaskOnFirstDelivery() {
     TaskService service = service();
     when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.PROCESSING)));
-    when(tasks.claimForProcessing("task-1")).thenReturn(false);
+    when(tasks.claimForProcessing(eq("task-1"), any(), any())).thenReturn(false);
 
     service.process("task-1", 1);
 
-    verify(tasks, never()).releaseProcessing(any());
+    verify(tasks, never()).releaseProcessing(any(), any(), any());
   }
 
   /** 重试投递遇到上次被故障打断、仍停在 PROCESSING 的任务时，先放回 QUEUED 才能重新领取。 */
@@ -108,12 +108,27 @@ class TaskServiceTest {
   void releasesTaskLeftProcessingBeforeRetryDelivery() {
     TaskService service = service();
     when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.PROCESSING)));
-    when(tasks.claimForProcessing("task-1")).thenReturn(true);
+    when(tasks.releaseProcessing(eq("task-1"), any(), any())).thenReturn(true);
+    when(tasks.claimForProcessing(eq("task-1"), any(), any())).thenReturn(true);
 
     service.process("task-1", 2);
 
-    verify(tasks).releaseProcessing("task-1");
-    verify(tasks).claimForProcessing("task-1");
+    verify(tasks).releaseProcessing(eq("task-1"), any(), any());
+    verify(tasks).claimForProcessing(eq("task-1"), any(), any());
+  }
+
+  /** 多实例：任务仍挂在别的实例未过期的租约上时，重试投递不能把它抢过来执行。 */
+  @Test
+  void doesNotStealTaskHeldByAnotherInstance() {
+    TaskService service = service();
+    when(tasks.find("task-1")).thenReturn(Optional.of(task(TaskStatus.PROCESSING)));
+    when(tasks.releaseProcessing(eq("task-1"), any(), any())).thenReturn(false);
+
+    service.process("task-1", 2);
+
+    verify(tasks).releaseProcessing(eq("task-1"), any(), any());
+    verify(tasks, never()).claimForProcessing(any(), any(), any());
+    verify(tasks, never()).update(any(), any(), any(), anyInt(), any());
   }
 
   /** 重试耗尽后任务判为失败，原因写进错误信息供用户决定是否人工重投。 */
@@ -209,12 +224,14 @@ class TaskServiceTest {
   }
 
   private TaskService service(Path storage) {
+    WorkbenchMetrics metrics =
+        new WorkbenchMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     return new TaskService(
         tasks,
         new ObjectMapper(),
         llm,
         new ResultValidator(),
-        new WorkbenchMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+        metrics,
         storage.toString(),
         "ffmpeg",
         "http://127.0.0.1:8090",
@@ -225,6 +242,7 @@ class TaskServiceTest {
         1,
         60000,
         queue,
+        new TaskLease(tasks, queue, metrics, "test-instance", 90),
         DownstreamResilience.withDefaults());
   }
 

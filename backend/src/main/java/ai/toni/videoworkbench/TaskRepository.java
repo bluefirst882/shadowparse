@@ -6,6 +6,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -55,9 +56,15 @@ class TaskRepository {
         limit);
   }
 
-  List<VideoTask> recoverable() {
+  /**
+   * 启动恢复用：状态是 {@code QUEUED} 但不确定消息是否还在队列里的任务，需要重投一遍。
+   *
+   * <p>只取 {@code QUEUED}：{@code PROCESSING} 的行归属某个持有者的租约，租约没过期就说明它的主人正拿着消息在跑， 重投只会被领取条件挡掉；租约确实过期时由
+   * {@link TaskLease} 的巡检负责回收与重投。
+   */
+  List<VideoTask> queued() {
     return jdbc.query(
-        "select * from tasks where cancelled=false and status in ('QUEUED','PROCESSING') order by created_at",
+        "select * from tasks where cancelled=false and status='QUEUED' order by created_at",
         mapper);
   }
 
@@ -88,8 +95,13 @@ class TaskRepository {
   }
 
   void update(String id, TaskStatus s, TaskStage stage, int progress, String error) {
+    // 租约只在 PROCESSING 期间存在：任何离开 PROCESSING 的状态写入都顺手清掉持有者与租约，
+    // 免得一条已经 FAILED 的任务上还挂着上一任持有者的租约，排查时产生误导。
+    boolean holding = s == TaskStatus.PROCESSING;
     jdbc.update(
-        "update tasks set status=?,stage=?,progress=?,error_message=?,updated_at=? where id=?",
+        "update tasks set status=?,stage=?,progress=?,error_message=?,updated_at=?"
+            + (holding ? "" : ",locked_by=null,lease_expires_at=null")
+            + " where id=?",
         s.name(),
         stage.name(),
         progress,
@@ -114,30 +126,95 @@ class TaskRepository {
         id);
   }
 
-  boolean claimForProcessing(String id) {
+  /**
+   * 领取任务：把 {@code QUEUED} 原子改成 {@code PROCESSING}，同时记下持有者与租约到期时间。
+   *
+   * <p>条件更新是幂等的唯一裁决点——多个实例（或多个消费者线程）同时投递同一条消息时，只有一个能领到。 租约只是让其它实例知道「这条 PROCESSING
+   * 有人在跑、什么时候算失联」，不参与幂等裁决。
+   */
+  boolean claimForProcessing(String id, String instanceId, Instant leaseExpiresAt) {
     return jdbc.update(
-            "update tasks set status='PROCESSING',updated_at=? where id=? and status='QUEUED' and cancelled=false",
+            "update tasks set status='PROCESSING',locked_by=?,lease_expires_at=?,updated_at=? where id=? and status='QUEUED' and cancelled=false",
+            instanceId,
+            Timestamp.from(leaseExpiresAt),
             Timestamp.from(Instant.now()),
             id)
         == 1;
   }
 
-  void markProcessingAsQueued() {
-    jdbc.update(
-        "update tasks set status='QUEUED',updated_at=? where status='PROCESSING' and cancelled=false",
-        Timestamp.from(Instant.now()));
+  /**
+   * 续租：只续本实例真正在处理的任务。
+   *
+   * <p>按任务号逐个续而不是「把自己名下所有 PROCESSING 都续一遍」：实例可能因为数据库故障把某个任务放成了 「仍标着 PROCESSING
+   * 但已经不再处理」的状态，若按实例整批续租，这条永远不会过期，任务就卡死了。
+   *
+   * @return 续上的行数；0 说明租约已被回收或已不属于本实例
+   */
+  int renewLeases(Collection<String> taskIds, String instanceId, Instant leaseExpiresAt) {
+    int renewed = 0;
+    for (String id : taskIds)
+      renewed +=
+          jdbc.update(
+              "update tasks set lease_expires_at=? where id=? and locked_by=? and status='PROCESSING'",
+              Timestamp.from(leaseExpiresAt),
+              id,
+              instanceId);
+    return renewed;
   }
 
   /**
-   * 把卡在 {@code PROCESSING} 的单个任务放回 {@code QUEUED}。
+   * 租约已过期（含升级前遗留、从未写过租约）却仍标着 {@code PROCESSING} 的任务号。
    *
-   * <p>用于重试投递：上一次尝试被基础设施故障（数据库短暂不可达等）打断时任务仍是 {@code PROCESSING}， 不放回去这次重试就领不到它。
+   * <p>这些行的持有者多半已经不在了，需要回收重投，否则它们会永远卡在「处理中」。
    */
-  boolean releaseProcessing(String id) {
+  List<String> expiredClaims(Instant now) {
+    return jdbc.queryForList(
+        "select id from tasks where cancelled=false and status='PROCESSING' and (lease_expires_at is null or lease_expires_at<?)",
+        String.class,
+        Timestamp.from(now));
+  }
+
+  /**
+   * 回收一条过期租约，把它放回 {@code QUEUED} 等待重投。
+   *
+   * <p>条件里再校验一次租约确已过期：多个实例同时巡检时，只有一个能把行改成 QUEUED，避免重复回收与重复投递。
+   */
+  boolean releaseExpiredClaim(String id, Instant now) {
+    Timestamp at = Timestamp.from(now);
     return jdbc.update(
-            "update tasks set status='QUEUED',updated_at=? where id=? and status='PROCESSING'",
-            Timestamp.from(Instant.now()),
-            id)
+            "update tasks set status='QUEUED',locked_by=null,lease_expires_at=null,updated_at=? where id=? and status='PROCESSING' and (lease_expires_at is null or lease_expires_at<?)",
+            at,
+            id,
+            at)
+        == 1;
+  }
+
+  /**
+   * 优雅停机：把自己持有的任务立刻放回 {@code QUEUED}，别的实例可以马上接手，不必等租约过期。
+   *
+   * @return 释放的行数
+   */
+  int releaseClaimsOwnedBy(String instanceId) {
+    return jdbc.update(
+        "update tasks set status='QUEUED',locked_by=null,lease_expires_at=null,updated_at=? where status='PROCESSING' and locked_by=?",
+        Timestamp.from(Instant.now()),
+        instanceId);
+  }
+
+  /**
+   * 把卡在 {@code PROCESSING} 的任务放回 {@code QUEUED}。
+   *
+   * <p>用于重试投递：上一次尝试被基础设施故障（数据库短暂不可达等）打断时任务仍是 {@code PROCESSING}，
+   * 不放回去这次重试就领不到它。但只有「租约属于本实例」或「租约已过期」时才放——否则就是别的实例正在处理的任务， 抢回来会造成重复执行。
+   */
+  boolean releaseProcessing(String id, String instanceId, Instant now) {
+    Timestamp at = Timestamp.from(now);
+    return jdbc.update(
+            "update tasks set status='QUEUED',locked_by=null,lease_expires_at=null,updated_at=? where id=? and status='PROCESSING' and (locked_by=? or lease_expires_at is null or lease_expires_at<?)",
+            at,
+            id,
+            instanceId,
+            at)
         == 1;
   }
 

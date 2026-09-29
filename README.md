@@ -63,6 +63,18 @@
 队列不可用时任务保持 `QUEUED` 并提示稍后重试，不会假装已经入队；异步拒收由
 `workbench_queue_publish_failures_total` 计数与 ERROR 日志暴露，不让任务「静默停在 QUEUED」。
 
+**多实例靠租约，不靠「状态即锁」**：只有 `status` 一个字段时，第二个实例无法区分「这个 `PROCESSING` 是别人正在跑」
+还是「持有者已经死了」，只能二选一——要么启动时抢别人的活，要么让崩溃的任务永远卡住。所以领取任务时会额外写入
+`locked_by`（实例 id，来自 `WORKBENCH_INSTANCE_ID`，留空则用「主机名 + 随机后缀」）与 `lease_expires_at`：
+- 持有者按 `WORKBENCH_LEASE_HEARTBEAT_MILLIS` 续**自己真正在跑**的任务（内存里记着 `held` 集合，
+  被放弃的行不会被续到永不过期）；巡检线程按 `WORKBENCH_LEASE_SWEEP_MILLIS` 找 `lease_expires_at` 已过的行，
+  收回并重投——迁移前遗留的 `lease_expires_at is null` 行按「已过期」处理，升级期间被中断的任务不会卡住。
+- 优雅停机在 `@PreDestroy` 里 `releaseClaimsOwnedBy(实例 id)` **立刻**交还；被 `SIGKILL` 才走租约过期回收。
+- 重试投递（`attempt > 1`）先看租约：只有当持有者是自己、或租约已过期时才就地放回 `QUEUED`，否则直接跳过，
+  绝不抢别的实例正在跑的任务。
+- 边界（如实说明）：回收的前提是持有者与数据库失联超过一个租约时长。若持有者其实还活着（只是网络分区），
+  仍可能被回收并造成**一次重复执行**；彻底消除需要 fencing token，**当前未实现**。
+
 **失败分流**：可重试的瞬时故障（Whisper 服务不可达 / 超时 / 5xx、数据库短暂不可达）不判死，而是投递到重试队列按
 **指数退避**（默认 5s → 10s → 20s）再来一次，等待时间由消息自身的 TTL 承载——不占线程 sleep，进程重启也不会把等待中的重试丢掉。
 超过 `WORKBENCH_QUEUE_MAX_ATTEMPTS`（默认 4）次后，消息进死信队列留档、任务在库里标为 `FAILED` 并写明重试次数与原因，
@@ -84,7 +96,10 @@
 
 - **一次提交自动跑完**：上传后自动完成音频提取、转写与内容生成，转写结束即串联摘要与章节，无需手动触发；摘要阶段校验不通过会自动重新生成，最多 3 次。
 - **重试边界**：已保留转写的任务可单独重试摘要；其他失败任务从本地处理重新开始。
-- **重启恢复**：消息与队列都是持久化的，崩溃时未确认的消息由 broker 重投；服务启动时先把残留的 `PROCESSING` 任务改回 `QUEUED` 并重投，**再**开始消费（顺序反了会让重投的消息因为任务仍是 `PROCESSING` 而被白白确认）。消息放进队列的环节由 `TaskService.recoverAfterRestart()` 与 `TaskQueueConsumer.start()` 共同保证。
+- **重启恢复**：消息与队列都是持久化的，崩溃时未确认的消息由 broker 重投；服务启动时先回收**租约已过期**的任务
+  （见上一节的租约机制）并把仍然 `QUEUED` 的任务重投，**再**开始消费——顺序反了会让重投的消息因为任务仍是 `PROCESSING` 而被白白确认。
+  重投的消息本身靠 `claimForProcessing` 的条件更新兜底，重复的那几条会被判为重复投递直接丢弃。
+  消息放进队列的环节由 `TaskService.recoverAfterRestart()` 与 `TaskQueueConsumer.start()` 共同保证。
 - **产物一致性**：任务记录写入失败时回收刚上传的视频；删除任务时若本地视频或音频清理失败，则保留任务记录并返回错误，避免产生不可追踪的本地文件。
 - **转写与摘要解耦**：未配置云端密钥时任务以「本地转写已完成」状态保留，
   配置后可单独重试内容生成，不丢失已完成的转写结果
@@ -372,6 +387,8 @@ Whisper 侧的时间证据更直观：真实失败要等满 **10s** 连接超时
 | 投递失败次数 | `workbench.queue.publish_failures` | `workbench_queue_publish_failures_total`   | broker 确认（publisher confirm）未成功返回的次数                | 无                                         | `RabbitTaskQueue.publish`          |
 | 退避重试次数 | `workbench.queue.retries`          | `workbench_queue_retries_total`            | 瞬时故障后安排退避重试的次数                                    | `reason=whisper_unavailable/database_unavailable/llm_unavailable`、`attempt`（即将进行的第几次尝试） | `TaskQueueConsumer.retryLater`     |
 | 死信任务数   | `workbench.queue.dead_letters`     | `workbench_queue_dead_letters_total`       | 超过重试上限、转入死信队列留档的任务数（需要人工处理）           | `reason`                                   | `TaskQueueConsumer.deadLetter`     |
+| 任务领取结果 | `workbench.task.claims`            | `workbench_task_claims_total`              | 每次投递的领取结果，`claimed` 才算真正执行、`skipped` 是被判重复投递而丢弃；同一任务无论投递多少次只有一次 `claimed` | `result=claimed/skipped`                   | `TaskService.process`              |
+| 租约回收次数 | `workbench.task.lease_reclaims`    | `workbench_task_lease_reclaims_total`      | 租约过期被收回重投的任务数（持有者崩溃才会发生，用于观测失联与恢复） | 无                                         | `TaskLease.reclaimExpired`         |
 
 下表的指标由 `resilience4j-micrometer` 自动导出，名字不是本项目起的，但它是判断「下游到底挂没挂」最直接的入口：
 
@@ -552,6 +569,10 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | `WORKBENCH_QUEUE_MAX_ATTEMPTS`      | 4                                  | 瞬时故障最多尝试几次，用尽后进死信队列              |
 | `WORKBENCH_QUEUE_RETRY_INITIAL_DELAY_MILLIS` | 5000                       | 首次重试前的退避时间（毫秒）                       |
 | `WORKBENCH_QUEUE_RETRY_MULTIPLIER`  | 2                                  | 退避倍率：第 n 次失败后等待「初始延迟 × 倍率^(n-1)」 |
+| `WORKBENCH_INSTANCE_ID`             | 空                                 | 多实例认领用的实例标识。留空时用「主机名 + 随机 8 位后缀」；**同一时刻两个实例不能共用同一值** |
+| `WORKBENCH_LEASE_SECONDS`           | 90                                 | 任务租约时长（秒）。持有者崩溃后，超过这个时长且被巡检扫到才会被回收重投 |
+| `WORKBENCH_LEASE_HEARTBEAT_MILLIS`  | 20000                              | 续租心跳间隔（毫秒），必须明显小于租约时长，否则自己的任务会被自己回收 |
+| `WORKBENCH_LEASE_SWEEP_MILLIS`      | 30000                              | 过期租约巡检间隔（毫秒）。回收最坏延迟 ≈ 租约时长 + 巡检间隔       |
 | `FFMPEG_PATH`                       | `ffmpeg`                           | FFmpeg 可执行文件路径                              |
 | `WHISPER_MODEL`                     | `turbo`                            | Whisper 模型规格                                   |
 | `WHISPER_SERVICE_URL`               | `http://host.docker.internal:8090` | 宿主机 Whisper 服务地址                            |
@@ -650,6 +671,29 @@ Prometheus 目标 `video-workbench-backend` 为 `up`，Grafana 面板与数据�
 如实记录两处边界：一是**半开探测与退避预算的相对关系会改变结局**——熔断器打开 30s 后进入半开，
 而退避总时长 35s，最后一次重试有时会真的发出去、任务按普通失败落库而不是进死信，两种结局都实测到了；
 二是并发隔板的饱和拒绝目前只有单元测试覆盖（容器里消费者并发为 1，压不出打满，且 Resilience4j 不导出 rejected 计数器）。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
+多实例任务认领（P2-4）同样在容器环境实测（验收标准：起两个实例并发消费同一队列，无重复执行）：
+另起一个 backend 容器（`docker compose run -d --name toni-backend-b -e WORKBENCH_LEASE_SECONDS=30 -e WORKBENCH_LEASE_HEARTBEAT_MILLIS=10000 backend`）
+与 compose 里的 `backend` 消费**同一个** `workbench.tasks`：
+
+- **不抢别人的活**：6 个真实任务，在第一个实例正处理**中间**时启动第二个实例——该任务的 `locked_by` 全程保持不变、
+  正常跑到 `COMPLETED`，第二个实例的启动日志只是「启动恢复发现 5 条排队中的任务，重新投递」，
+  这 5 条重投在第一个实例侧全部记成 `workbench_task_claims_total{result="skipped"}`（幂等兜底生效）。
+  两个实例各自持有不同任务、从未重叠，6 个任务全部 `COMPLETED/COMPLETED`、`locked_by` 与 `lease_expires_at` 全部回到 `NULL`。
+- **重复投递仍然只执行一次**：把 3 个**已完成**任务的消息用管理 API 再直投一次，
+  两个实例合计出现 3 次「跳过重复投递」，`{result="skipped"}` 由 5 / 0 升到 7 / 1，
+  三条任务的 `transcript_segments`（各 8 行）与 `llm_calls`（各 1 行）**一行都没有新增**。
+- **崩溃接管**：`docker kill`（SIGKILL，`Exited (137)`，不走优雅停机）杀掉持有任务的实例，
+  另一实例在其租约到期后打出「任务租约已过期，收回并重新投递：… 上一次持有者已失联」并重新领取该任务；
+  该任务全程只有一条回收记录，没有反复回收的抖动。
+- 后端 `mvnw verify` 通过：`Tests run: 135, Failures: 0, Errors: 0, Skipped: 4`，Spotless 通过；
+  MySQL 集成测试（含新增的「只回收过期租约」断言）对 compose 的 MySQL 实跑通过（`Tests run: 2, ... Skipped: 0`）。
+- 如实记录三点边界：一是**崩溃接管那次没有跑出 `COMPLETED`**——两个长视频让两个实例同时向同一个 GPU 上的
+  Whisper 发起转写，Whisper 因显存不足返回 `500`，任务经退避用尽后进死信；所以证据只支持「租约回收 + 重投生效」，
+  「无重复执行的 `COMPLETED`」由上面 6 任务那组实测支撑；二是回收的前提是持有者与数据库失联超过一个租约时长，
+  若持有者其实还活着（网络分区）仍可能造成**一次重复执行**，彻底消除需要 fencing token，**未实现**；
+  三是 `workbench_task_lease_reclaims_total` 与其它计数器一样按需注册，只有发生过回收才出现在
+  `/actuator/prometheus`，且随进程重启清零。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 
 ---
 

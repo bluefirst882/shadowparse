@@ -102,12 +102,15 @@ class TaskRepositoryTest {
 
   @Test
   void claimsOnlyQueuedUncancelledTask() {
-    when(jdbc.update(any(String.class), any(), eq("task-1"))).thenReturn(1);
+    when(jdbc.update(any(String.class), any(), any(), any(), eq("task-1"))).thenReturn(1);
 
-    assertTrue(repository.claimForProcessing("task-1"));
+    assertTrue(
+        repository.claimForProcessing("task-1", "instance-a", Instant.now().plusSeconds(90)));
     verify(jdbc)
         .update(
             org.mockito.ArgumentMatchers.contains("status='QUEUED' and cancelled=false"),
+            eq("instance-a"),
+            any(),
             any(),
             eq("task-1"));
   }

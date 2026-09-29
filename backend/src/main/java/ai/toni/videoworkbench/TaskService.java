@@ -50,6 +50,7 @@ class TaskService {
   private final long timeoutMinutes;
   private final int summaryMaxInputChars;
   private final TaskQueue queue;
+  private final TaskLease lease;
   private final DownstreamResilience resilience;
   // 复用同一个客户端：HttpClient 自带连接池与选择器线程，每次调用新建一个会持续泄漏线程与连接。
   private final HttpClient whisperHttp =
@@ -72,6 +73,7 @@ class TaskService {
       @Value("${workbench.process-timeout-minutes}") long timeoutMinutes,
       @Value("${workbench.llm.max-input-chars:60000}") int summaryMaxInputChars,
       TaskQueue queue,
+      TaskLease lease,
       DownstreamResilience resilience) {
     this.tasks = tasks;
     this.json = json;
@@ -88,6 +90,7 @@ class TaskService {
     this.timeoutMinutes = timeoutMinutes;
     this.summaryMaxInputChars = summaryMaxInputChars;
     this.queue = queue;
+    this.lease = lease;
     this.resilience = resilience;
   }
 
@@ -244,27 +247,31 @@ class TaskService {
   void stop() {
     runningProcesses.values().forEach(Process::destroyForcibly);
     runningProcesses.clear();
+    // 优雅停机时把本实例持有的任务交还出去，别的实例可以立刻接手，不必等租约自然过期。
+    lease.releaseOwned();
   }
 
   void recoverAfterRestart() {
-    tasks.markProcessingAsQueued();
-    tasks
-        .recoverable()
-        .forEach(
-            task -> {
-              try {
-                enqueue(task.id());
-              } catch (ResponseStatusException ignored) {
-                // broker 暂不可用：任务保持 QUEUED，恢复后可由用户重试或下次启动时重投。
-              }
-            });
+    // 只回收租约已过期的行：租约没过期说明另一个实例正拿着消息在跑，改回 QUEUED 会造成重复执行。
+    // 本实例自己上一轮持有的任务由优雅停机时的交还负责（见 stop()），崩溃则等租约到期由巡检回收。
+    lease.reclaimExpired();
+    List<VideoTask> stranded = tasks.queued();
+    if (!stranded.isEmpty()) log.info("启动恢复发现 {} 条排队中的任务，重新投递", stranded.size());
+    stranded.forEach(
+        task -> {
+          try {
+            enqueue(task.id());
+          } catch (ResponseStatusException ignored) {
+            // broker 暂不可用：任务保持 QUEUED，恢复后可由用户重试或下次启动时重投。
+          }
+        });
   }
 
   /**
    * 处理单个任务。由队列消费者调用（{@link TaskQueueConsumer}），不直接暴露给 HTTP 调用方。
    *
    * <p>领取任务是幂等的关键：只有把任务从 {@code QUEUED} 原子改成 {@code PROCESSING} 成功的那个消费者才会往下执行， 因此同一条消息被重复投递（broker
-   * 重投、用户反复点重试）也只会真正处理一次。
+   * 重投、用户反复点重试、多实例同时消费）也只会真正处理一次。
    *
    * <p>失败分两类：可重试的瞬时故障（Whisper 不可达、数据库不可达等）抛 {@link TransientFailure}，任务放回 {@code QUEUED}
    * 由消费者安排退避重试；其余失败直接落 {@code FAILED}，重试多少次都是同样的结果，不值得占用重试额度。
@@ -279,16 +286,23 @@ class TaskService {
     }
     if (attempt > 1 && task.status() == TaskStatus.PROCESSING) {
       // 这条消息就是它自己的重试投递，而任务还停在 PROCESSING：说明上一次尝试被基础设施故障打断、
-      // 没来得及改状态。先放回 QUEUED 才能重新领取，否则这次重试会被当成重复投递白白丢掉。
-      log.warn("重试投递发现任务仍是 PROCESSING，先放回 QUEUED：taskId={} attempt={}", id, attempt);
-      tasks.releaseProcessing(id);
+      // 没来得及改状态。只有租约仍属于本实例或已经过期才放回 QUEUED——否则就是别的实例正在处理的任务，
+      // 抢回来会造成重复执行，这次投递直接放弃即可。
+      log.warn("重试投递发现任务仍是 PROCESSING，尝试收回：taskId={} attempt={}", id, attempt);
+      if (!lease.releaseIfAbandoned(id)) {
+        log.warn("任务租约仍在其它实例手上，放弃这次重试投递：taskId={}", id);
+        return;
+      }
     }
-    if (!tasks.claimForProcessing(id)) {
-      // 重复投递（broker 重投、用户连点重试）只会走到这里：原子领取失败即说明别的消费者已经在处理，
+    if (!lease.claim(id)) {
+      // 重复投递（broker 重投、用户连点重试、另一个实例先领到）只会走到这里：原子领取失败即说明别的消费者已经在处理，
       // 或任务已经结束，直接确认掉这条消息即可。
-      log.info("任务已被领取或已结束，跳过重复投递：taskId={}", id);
+      metrics.recordTaskClaim(false);
+      log.info("任务已被其它实例领取或已结束，跳过重复投递：taskId={} instance={}", id, lease.instanceId());
       return;
     }
+    metrics.recordTaskClaim(true);
+    lease.hold(id);
     TaskStage currentStage = task.stage();
     try {
       if (currentStage == TaskStage.SUMMARY) {
@@ -337,6 +351,9 @@ class TaskService {
     } catch (Exception ex) {
       String detail = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
       tasks.update(id, TaskStatus.FAILED, currentStage, 0, "本地处理失败：" + tail(detail));
+    } finally {
+      // 无论成败都不再续租：失败的任务已经放回 QUEUED 或判为 FAILED，还挂着租约只会在排查时误导。
+      lease.drop(id);
     }
   }
 

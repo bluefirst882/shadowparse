@@ -55,17 +55,21 @@ class TaskPaginationTest {
           error_message varchar(1024),
           created_at timestamp(3) not null,
           updated_at timestamp(3) not null,
-          cancelled boolean not null default false
+          cancelled boolean not null default false,
+          locked_by varchar(64),
+          lease_expires_at timestamp(3)
         )
         """);
     repository = new TaskRepository(jdbc, new ObjectMapper());
+    TaskQueue queue = Mockito.mock(TaskQueue.class);
+    WorkbenchMetrics metrics = new WorkbenchMetrics(new SimpleMeterRegistry());
     service =
         new TaskService(
             repository,
             new ObjectMapper(),
             Mockito.mock(LlmClient.class),
             new ResultValidator(),
-            new WorkbenchMetrics(new SimpleMeterRegistry()),
+            metrics,
             "target/task-pagination-storage",
             "ffmpeg",
             "http://127.0.0.1:8090",
@@ -75,7 +79,8 @@ class TaskPaginationTest {
             1024,
             1,
             60000,
-            Mockito.mock(TaskQueue.class),
+            queue,
+            new TaskLease(repository, queue, metrics, "test-instance", 90),
             DownstreamResilience.withDefaults());
   }
 
