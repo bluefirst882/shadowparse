@@ -269,6 +269,67 @@ Whisper 侧的时间证据更直观：真实失败要等满 **10s** 连接超时
 （这点时间只够 ffmpeg 抽音频），请求根本没发出去。完整数据与两种结局的差异见
 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 
+### 10. 接口容量与瓶颈
+
+压测脚本在 `ops/k6/`：`query.js` 只读（列表 / 详情 / 明细按 7:2:1 混合、阶梯加压），`upload.js` 以恒定速率
+投递同一个真实短视频。k6 用官方镜像跑在 compose 网络里，不需要额外安装：
+
+```powershell
+# 读接口：100 → 400 次/秒 阶梯加压，每段 30s
+docker run --rm --network toni-2_default -v "$PWD/ops/k6:/scripts" -w /scripts `
+  -e BASE_URL=http://backend:8080 -e RESULT_NAME=query-high -e READ_START=100 -e READ_TARGETS=200,300,400,400 `
+  grafana/k6 run query.js
+# 上传接口：恒定 2 次/秒，压的是 48 KB 的 4 秒真实片段（fixture 生成命令见脚本顶部注释）
+docker run --rm --network toni-2_default -v "$PWD/ops/k6:/scripts" -w /scripts `
+  -e BASE_URL=http://backend:8080 -e UPLOAD_RATE=2 -e UPLOAD_DURATION=30s -e RESULT_NAME=upload `
+  grafana/k6 run upload.js
+```
+
+下表是客户端观测到的延迟（毫秒），两轮读压测各跑 120 秒、到达速率逐段爬升，`k6` 报告**零**丢弃迭代、
+零失败请求：
+
+| 接口                                    | 到达速率      | 请求数 | 失败 | avg | p95  | p99  | max   |
+| --------------------------------------- | ------------- | ------ | ---- | --- | ---- | ---- | ----- |
+| `GET /api/tasks?limit=20`（列表）       | 20→120 次/秒  | 6493   | 0    | 2.13 | 2.96 | 4.20 | 10.73 |
+| `GET /api/tasks/{id}`（详情）           | 20→120 次/秒  | 1869   | 0    | 1.96 | 2.77 | 4.14 | 6.40  |
+| `GET /api/tasks/{id}/details`（明细）   | 20→120 次/秒  | 937    | 0    | 2.88 | 4.15 | 5.51 | 14.68 |
+| 列表（高档）                            | 100→400 次/秒 | 24222  | 0    | 1.50 | 1.91 | 2.25 | 6.15  |
+| 详情（高档）                            | 100→400 次/秒 | 6846   | 0    | 1.36 | 1.76 | 2.06 | 6.07  |
+| 明细（高档）                            | 100→400 次/秒 | 3432   | 0    | 2.11 | 2.75 | 3.13 | 6.32  |
+| `POST /api/tasks`（上传，20s）          | 恒定 2 次/秒  | 40     | 0    | 11.90 | 14.66 | 17.15 | 18.57 |
+| `POST /api/tasks`（上传，30s）          | 恒定 2 次/秒  | 61     | 0    | 10.78 | 14.84 | 18.19 | 20.65 |
+
+同一时段的容器资源（`docker stats` 采样，CPU 是单核口径）：backend **37–48%**、557 MiB；
+mysql **14–17%**、199 MiB；whisper 空载 0.01%、3.37 GiB。数据库连接池上限 10 条，压测期间
+`hikaricp_connections_pending` 全程为 **0**。
+
+服务端侧也对照过一遍：同一档 200 次/秒下 `/actuator/prometheus` 直方图算出的 P95 是
+列表 **2.05 ms** / 详情 **1.83 ms** / 明细 **3.02 ms**，比客户端观测低约 1 ms，
+差的这部分来自容器端口映射与 k6 自身（`management.metrics.distribution.percentiles-histogram.http.server.requests`
+此前没有开，Timer 只导出 `_count/_sum/_max`、`histogram_quantile` 会返回空，这次一并打开）。
+
+**瓶颈分析**：
+
+- **读接口没压出拐点**。400 次/秒下 p95 仍只有 2 ms 左右，连接池没有等待、CPU 也没打满。
+  本机是 k6 与被压服务同机（Docker Desktop / WSL2），再往上加压客户端自己先成为瓶颈，
+  所以这里**不给「最大 QPS」这个数字**，只给「该速率下的延迟」。
+- **上传的接收路径很便宜**：一次落盘 + 一条 insert + 一次投递，p95 约 15 ms，与文件大小基本无关
+  （压的是 48 KB 片段，上限 `MAX_UPLOAD_BYTES` 默认 2 GiB）。它是异步接口，**不承担下游处理时间**。
+- **真正的瓶颈在处理侧，且不在同一个量级**。三条叠加：进程内消费者 `concurrency=1` + `prefetch=1`、
+  Whisper 容器内串行、每个任务还要一次摘要加若干次翻译调用。实测上传 2 次/秒跑 30 秒产生 61 个任务，
+  加上前一轮 40 个，broker 积压从 0 线性涨到 **97**；同期消费侧排空速率约 **2 个/分钟**
+  （`16:01:33` 完成 3 个 → `16:02:37` 完成 5 个），**接收能力是处理能力的 60 倍以上**。
+- **Whisper 的每次调用有固定开销**：4 秒片段在容器里也要约 **10 s**（进度条 `401/401 frames`、
+  `39–40 frames/s`），而早前 40 秒样本是 32.5 s——所以「上传更小的文件」并不能显著提高单位时间任务数。
+- 因此系统的表现是**接口永远很快、积压线性增长**：当前**没有背压也没有拒绝策略**
+  （`importVideo` 只受大小限制），积压由 broker 持久化保护、不会丢，但会一直堆到人工干预。
+  这条已经写进 [当前不支持与下一步](#当前不支持与下一步)。
+
+如实记录边界：一是单机同机压测，客户端与服务端抢同一份 CPU，数字不能外推为生产容量；
+二是上传场景只压接收路径、不含转写，**不是端到端 QPS**；三是没做长时间稳定性（soak）与读写混合压测，
+两轮读压测与上传轮次是分开跑的；四是排空曲线只覆盖约 100 秒，剩余积压由清理脚本删除（`DELETE /api/tasks/{id}`）。
+完整命令、采样脚本 `ops/k6/sample-queue.ps1` 与原始结果见 [docs/开发验证.md](docs/开发验证.md)。
+
 ---
 
 ## 项目结构
@@ -312,9 +373,10 @@ Whisper 侧的时间证据更直观：真实失败要等满 **10s** 连接超时
 ├── workers/                         # Whisper 推理服务
 │   ├── Dockerfile                        # 服务镜像：默认 CPU 版 torch，可用 build args 换 CUDA
 │   └── whisper_worker.py                 # HTTP 服务（/transcribe 与 /health），转写串行 + 模型缓存
-├── ops/                             # 可观测性栈配置
+├── ops/                             # 可观测性栈配置与压测脚本
 │   ├── prometheus/prometheus.yml         # 抓取 backend:8080/actuator/prometheus
-│   └── grafana/                          # 数据源与面板 provisioning（含面板 JSON）
+│   ├── grafana/                          # 数据源与面板 provisioning（含面板 JSON）
+│   └── k6/                               # 压测：query.js（只读）/ upload.js（上传）/ sample-queue.ps1（采样）
 ├── docs/                            # 需求说明、编码规范、验收记录、面板截图
 └── compose.yaml                     # Whisper / MySQL / RabbitMQ / 后端 / 前端 / Prometheus / Grafana
 ```
@@ -446,8 +508,16 @@ docker compose up -d --wait      # backend / frontend / mysql / prometheus / gra
 
 ![熔断器打开时的可观测性面板](docs/可观测性面板-熔断.png)
 
+压测那一轮的同一块面板（时间范围取最近 30 分钟，否则尖峰会被默认的 6 小时窗口压平）。最后一行
+「接口容量（压测，P3-2）」从左到右是 HTTP 请求速率（按接口）、HTTP 延迟 P95/P99（按接口）、数据库连接池、
+后端进程 CPU 与 JVM 堆、任务队列积压——队列积压那条线正是 P3-2 的结论：上传 2 次/秒期间积压线性涨到 **97**，
+而读接口的延迟曲线保持平直：
+
+![压测期间的可观测性面板](docs/可观测性面板-压测.png)
+
 复现截图：`npm run screenshot:grafana`（默认写入 `docs/可观测性面板.png`，可传文件名参数；
-面板变多后截图需要更高的视口，可用 `GRAFANA_VIEWPORT_HEIGHT=1500` 覆盖默认的 660）。
+面板变多后截图需要更高的视口，可用 `GRAFANA_VIEWPORT_HEIGHT=1500` 覆盖默认的 660；
+近窗口证据可用 `GRAFANA_RANGE_FROM=now-30m` 覆盖默认的 `now-6h`）。
 
 ### 鉴权取舍（如实说明）
 
@@ -730,6 +800,25 @@ Whisper 不再跑在宿主机 Python 进程里，而是 compose 里的 `whisper`
   二是 **GPU 路径未实测**（本机 Docker Desktop 未装 nvidia-container-toolkit），Dockerfile 已用 build args 预留 CUDA 构建入口；
   三是 `docker kill` / `docker stop` 属**显式停止**，Docker 语义下不会触发 `unless-stopped` 重启，
   自愈证据是用祖先命名空间 SIGKILL 模拟的真实崩溃。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
+
+压测与容量说明（P3-2）在容器环境实测（验收标准：README 有一张容量表与瓶颈分析）：
+用官方 k6 镜像在 compose 网络里跑 `ops/k6/query.js` 与 `ops/k6/upload.js`。
+
+- **读接口两轮阶梯加压**（20→120 次/秒、100→400 次/秒，各 120 秒）：共 43000+ 个请求、
+  **零失败**、k6 **零丢弃迭代**；高档下 p95 列表 1.91 ms / 详情 1.76 ms / 明细 2.75 ms。
+  连接池等待（`hikaricp_connections_pending`）全程为 0，**没有压出拐点**，因此不给「最大 QPS」这个数字。
+- **上传接口**恒定 2 次/秒跑两轮（20 s / 30 s）：接收路径 p95 约 **15 ms**、零失败；
+  它是异步接口，不承担下游处理时间。
+- **瓶颈在处理侧**：上传 2 次/秒持续 30 秒产生 61 个任务（连同前一轮共 101 个），
+  broker 积压线性涨到 **97**，而消费侧排空速率约 **2 个/分钟**（`16:01:33` 完成 3 个 → `16:02:37` 完成 5 个），
+  两者差 **60 倍以上**；Whisper 对 4 秒片段也要约 10 s（固定开销），所以上传更小的文件并不能提高任务吞吐。
+  系统表现为「接口永远很快、积压线性增长」——当前**没有背压也没有拒绝策略**。
+- 面板新增一行「接口容量（压测，P3-2）」并截图 [`docs/可观测性面板-压测.png`](docs/可观测性面板-压测.png)；
+  为让服务端 P95/P99 可算，打开了 `http.server.requests` 的 `percentiles-histogram`（此前只有 `_count/_sum/_max`）。
+  压测产生的 101 个任务已用 `DELETE /api/tasks/{id}` 清理。
+- 如实记录边界：单机同机压测（客户端与服务端抢同一份 CPU），数字不能外推为生产容量；
+  上传场景只压接收路径、**不是端到端 QPS**；未做长时间稳定性与读写混合压测；
+  排空曲线只覆盖约 100 秒。详见 [docs/端到端验收记录.md](docs/端到端验收记录.md)。
 
 ---
 
