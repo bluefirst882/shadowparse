@@ -124,8 +124,9 @@ Whisper 推理是独立运行的常驻 HTTP 服务（`workers/whisper_worker.py 
 - **镜像与模型分离**：镜像只装 Python + torch + whisper，模型权重靠挂载复用
   （默认 `./models/whisper`，可用 `WHISPER_MODELS_DIR` 指向已有缓存目录），不为 1.6GB 权重打包镜像；
   目录为空时首次启动会在容器内下载 `turbo` 权重。
-- **CPU 兜底、GPU 可选**：默认装 CPU 版 torch，镜像不依赖 NVIDIA 容器运行时，`/health` 会如实返回
-  `device=cpu`；要 GPU 就用 `--build-arg` 换成 CUDA 版 torch 再给容器加 GPU 预留（见 `workers/Dockerfile` 顶部注释）。
+- **只用 GPU**：compose 构建的就是 CUDA 版 torch（`cu124`），并给容器预留一块 NVIDIA GPU
+  （宿主机需装 nvidia-container-toolkit）；`WHISPER_DEVICE=cuda` 是显式声明，容器没拿到 GPU
+  时 whisper 启动即失败并留下明确报错，绝不静默回落 CPU。`/health` 会如实返回 `device`。
 - **转写串行**：`/transcribe` 在 worker 内用锁串行执行。容器化之前实测两个后端实例同时向同一个 GPU 发转写，
   直接 `CUDA out of memory` 返回 500；现在并发请求排队，而不是互相抢显存（CPU 下也避免互相抢核）。
 - **调用鉴权**：请求头携带 `X-Whisper-Token`，与后端共享密钥；服务启动时强制要求该密钥
@@ -643,10 +644,12 @@ docker builder prune -f
 ### 环境要求
 
 - Docker（含 Compose v2）：Whisper 转写服务也在 compose 里，全栈一条命令起完
+- **NVIDIA GPU + nvidia-container-toolkit**：whisper 容器只用 GPU 推理，启动时预留一块显卡
+  （验证：`docker run --rm --gpus all <任意镜像> nvidia-smi` 能列出显卡）；没有 GPU 的机器
+  起 whisper 会直接失败，这是设计行为而不是缺陷
 - Java 21、Node.js 20+（本机构建或直接跑后端/前端时需要）
 - MySQL 8.0+、RabbitMQ 4（或直接用 `compose.yaml` 起这两个依赖）
 - FFmpeg（容器内已装；仅在本机直接跑后端时才需要，可用 `FFMPEG_PATH` 指定）
-- 本机 GPU 不是必需项：默认镜像跑 CPU，`/health` 会如实报告实际设备
 
 ### 1. 配置
 
@@ -718,6 +721,7 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 | `WHISPER_SERVICE_URL`                        | `http://whisper:8090` | 后端访问的 Whisper 地址（compose 内用服务名）                                                                                            |
 | `WHISPER_MODELS_DIR`                         | `./models/whisper`    | 宿主机模型缓存目录，挂载到容器 `/models`                                                                                                 |
 | `WHISPER_HOST_PORT`                          | 8090                  | `whisper` 服务映射到宿主机的端口，`/health` 可查设备                                                                                     |
+| `WHISPER_DEVICE`                             | `cuda`                | 推理设备：`cuda` 只用 GPU（没拿到 GPU 启动即失败）；紧急时可临时改 `cpu`，但镜像仍是 CUDA 版                                             |
 | `WHISPER_CPU_THREADS`                        | 4                     | 容器内 CPU 推理线程数（`OMP_NUM_THREADS`）                                                                                               |
 | `WORKBENCH_JWT_SECRET`                       | 无（必填）            | JWT 签名密钥，至少 32 字符，需自行随机生成                                                                                               |
 | `WORKBENCH_TOKEN_TTL_HOURS`                  | 24                    | 令牌有效期（小时）                                                                                                                       |
@@ -739,10 +743,9 @@ npm --prefix frontend run build         # vue-tsc 类型检查 + 生产构建
 > 密钥仅由后端读取，不会写入日志、前端响应或导出文件。
 
 后端把提取好的 16kHz 单声道 WAV 上传到 compose 内的 `whisper:8090`，接口由 `WHISPER_SERVICE_TOKEN` 保护，
-模型权重从宿主机目录挂载进来（`WHISPER_MODELS_DIR`）。镜像默认装 CPU 版 PyTorch，
-所以 `/health` 返回 `device=cpu`；要 GPU 需自行用 `workers/Dockerfile` 顶部的 build args 重建为
-CUDA 版 torch，并给服务加 GPU 预留（**默认不申请容器 GPU**：本机的 Docker Desktop 未必装了
-nvidia-container-toolkit，装不上时容器会直接起不来，那种情况下退化成宿主机进程反而更稳）。
+模型权重从宿主机目录挂载进来（`WHISPER_MODELS_DIR`）。**GPU 推理**：镜像按 build args 装 CUDA 版
+torch（`cu124`），compose 给容器预留一块 NVIDIA GPU，`WHISPER_DEVICE=cuda`；容器没拿到 GPU 时
+whisper 启动即失败（明确报错，不静默回落 CPU），`/health` 返回实际 `device` 与模型名。
 若首次下载因网络中断留下不完整的 `.pt` 文件，重试会重新校验并下载该模型；不要将未完成的文件当作已缓存模型。
 
 ---
@@ -915,8 +918,10 @@ Whisper 不再跑在宿主机 Python 进程里，而是 compose 里的 `whisper`
   （实测接收能力是处理能力的 60 倍以上），积压只能靠人工干预。
 - **租约回收可能造成一次重复执行**：持有者与数据库网络分区但仍活着时，巡检会收回租约，
   没有 fencing token 拦住原持有者继续写。多实例实测（含 `kill` 接管）未出现重复执行，但这是概率问题。
-- **Whisper 走容器内 CPU**：实测 4 秒片段约 10 s、134 秒视频约 130 s，常驻内存约 3.17 GiB；
-  Dockerfile 预留了 CUDA build args，**GPU 透传未实测**，不作为已验证能力。
+- **Whisper 只用 GPU，GPU 是硬依赖**：实测（2026-10-03，RTX 4060 Laptop）356 秒中文音频转写 40 s、
+  启动日志确认 `turbo on cuda (NVIDIA GeForce RTX 4060 Laptop GPU)`；没有 GPU 的机器起不了 whisper。
+  CPU 路径只在 P3-1 验收时实测过（4 秒片段约 10 s、134 秒视频约 130 s，常驻约 3.17 GiB），
+  现在 `WHISPER_DEVICE` 改回 `cpu` 理论上仍可用但未回归验证，且镜像仍是 CUDA 版（只大不快）。
 - 熔断器状态、租约回收计数等指标**随进程重启清零**，排障要结合日志，不能只看 Grafana。
 
 ### 上传与推送

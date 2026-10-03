@@ -19,6 +19,30 @@ _MODELS = {}
 _MODELS_LOCK = threading.Lock()
 
 
+def resolve_device():
+    """按 WHISPER_DEVICE 决定推理设备：auto（默认）= 有 CUDA 就用；cuda / cpu = 强制指定。
+
+    显式要求 cuda 但 torch 看不到 GPU 时直接抛错而不是悄悄回落 CPU——
+    配了 GPU 的机器静默降级，会让人误以为已经在用 GPU（/health 与转写结果里的 device 字段
+    都如实上报，但没人会主动去看）。"""
+    import torch
+
+    requested = os.environ.get("WHISPER_DEVICE", "auto").lower()
+    if requested == "cpu":
+        return "cpu"
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "WHISPER_DEVICE=cuda 但 torch.cuda.is_available() 为 False："
+                "检查容器是否拿到 GPU（需要宿主机 nvidia-container-toolkit 与 compose.yaml 里 "
+                "whisper 服务的设备预留）"
+            )
+        return "cuda"
+    if requested == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    raise RuntimeError(f"WHISPER_DEVICE 只支持 auto / cuda / cpu，实际为 {requested!r}")
+
+
 def load_model(model_name, model_dir, device):
     with _MODELS_LOCK:
         key = (model_name, device)
@@ -34,9 +58,7 @@ def load_model(model_name, model_dir, device):
 
 def transcribe(audio, model_name, model_dir, language):
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-    import torch
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device()
     model = load_model(model_name, model_dir, device)
     with _TRANSCRIBE_LOCK:
         with contextlib.redirect_stdout(sys.stderr):
@@ -119,15 +141,16 @@ def serve():
     token = os.environ.get("WHISPER_SERVICE_TOKEN", "")
     if len(token) < 32:
         raise RuntimeError("WHISPER_SERVICE_TOKEN must contain at least 32 characters")
-    import torch
-
     model_name = os.environ.get("WHISPER_MODEL", "turbo")
     model_dir = os.environ.get("WHISPER_MODEL_DIR", "models/whisper")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    import torch
+
+    device = resolve_device()
     # 绑定端口前先加载模型：加载失败就让进程直接退出（容器随后按 restart 策略重启并留下明确报错），
     # 而不是端口「健康」、每次转写却都 500；也顺带省掉「每个请求重新加载模型」的开销。
     load_model(model_name, model_dir, device)
-    print(f"Whisper model ready: {model_name} on {device}", file=sys.stderr)
+    gpu_name = f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""
+    print(f"Whisper model ready: {model_name} on {device}{gpu_name}", file=sys.stderr)
 
     server = ThreadingHTTPServer(
         (os.environ.get("WHISPER_HOST", "0.0.0.0"), int(os.environ.get("WHISPER_PORT", "8090"))),

@@ -165,10 +165,15 @@ services:
       timeout: 5s
       retries: 20
   # Whisper 转写服务：容器化托管，进程死掉由 restart 策略拉起来（见 README「Whisper 容器化」）。
+  # GPU 推理：镜像装 CUDA 版 torch，容器预留一块 NVIDIA GPU（宿主机需装 nvidia-container-toolkit，
+  # 验证：docker run --rm --gpus all <任意镜像> nvidia-smi 能列出显卡）。
   whisper:
     build:
       context: .
       dockerfile: workers/Dockerfile
+      args:
+        TORCH_INDEX: https://download.pytorch.org/whl/cu124
+        TORCH_VERSION: 2.5.1+cu124
     environment:
       WHISPER_SERVICE_TOKEN: ${WHISPER_SERVICE_TOKEN:?请在 .env 中设置 WHISPER_SERVICE_TOKEN}
       WHISPER_MODEL: ${WHISPER_MODEL:-turbo}
@@ -176,6 +181,8 @@ services:
       WHISPER_MODEL_DIR: /models
       WHISPER_PORT: '8090'
       WHISPER_MAX_UPLOAD_BYTES: ${WHISPER_MAX_UPLOAD_BYTES:-2147483648}
+      # 只用 GPU：显式要 cuda，容器没拿到 GPU 时启动即失败并留下明确报错，绝不静默回落 CPU。
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cuda}
       # 转写在 worker 内串行执行（见 whisper_worker.py），CPU 线程数直接决定单次转写耗时。
       OMP_NUM_THREADS: ${WHISPER_CPU_THREADS:-4}
     volumes:
@@ -183,6 +190,13 @@ services:
       - ${WHISPER_MODELS_DIR:-./models/whisper}:/models
     ports:
       - '${WHISPER_HOST_PORT:-8090}:8090'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       # /health 在模型加载完成后才可用，所以 healthy 表示「设备就绪且模型已加载」，不只是端口活着。
       test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:8090/health']

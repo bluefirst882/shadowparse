@@ -1,11 +1,9 @@
 # Whisper 推理服务镜像：把原来跑在宿主机 Python venv 里的 worker 收进容器，
 # 由 compose 负责健康检查与重启（见 README「Whisper 容器化」）。
 #
-# 默认装 CPU 版 PyTorch：镜像不依赖 NVIDIA 容器运行时，任何机器都能起来，
-# /health 会如实报告 device=cpu（模型权重靠挂载复用，不需要重新下载）。
-# 需要 GPU 时用 build args 换成 CUDA 版 torch，再给服务加 GPU 预留（需 nvidia-container-toolkit）：
-#   docker compose build whisper --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu124 \
-#                                --build-arg TORCH_VERSION=2.5.1+cu124
+# 镜像由 compose.yaml 用 CUDA build args 构建（cu124 版 torch + GPU 设备预留），
+# 只用 GPU 推理：容器没拿到 GPU 时 whisper_worker.py 启动即失败，绝不静默回落 CPU。
+# 此处的 CPU 默认值只是「直接 docker build 不带参数时」的兜底，正常入口是 docker compose build。
 FROM python:3.12-slim
 
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
