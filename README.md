@@ -453,6 +453,7 @@ npm run verify:sse               # 推送延迟与账号隔离：6 次全部对�
 | `POST`   | `/api/tasks/{id}/cancel`                       | 取消任务                                            |
 | `POST`   | `/api/tasks/{id}/retry`                        | 重试摘要或重新执行本地处理                          |
 | `POST`   | `/api/tasks/{id}/retranscribe`                 | 重新转写                                            |
+| `PATCH`  | `/api/tasks/{id}/name`                         | 任务改名（只改展示名，原文件名保留）                |
 | `GET`    | `/api/tasks/{id}/video`                        | 视频流（支持 Range）                                |
 | `GET`    | `/api/tasks/{id}/export/{format}`              | 导出 md / json / srt                                |
 | `DELETE` | `/api/tasks/{id}`                              | 删除任务、视频及提取的音频                          |
