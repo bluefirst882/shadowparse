@@ -4,12 +4,12 @@ import {
   ArrowLeft,
   Delete,
   Download,
+  Film,
   Moon,
   RefreshRight,
   Sunny,
   SwitchButton,
-  UploadFilled,
-  VideoPlay
+  UploadFilled
 } from '@element-plus/icons-vue'
 import { ApiError, api, token, type Details, type Task } from './api'
 const tasks = ref<Task[]>([]),
@@ -197,12 +197,29 @@ function seek(ms: number) {
     video.play().catch(() => {})
   }
 }
+// 章节引文较长时默认折叠两行，避免长引文把右侧章节列表撑爆；需要核对原文时手动展开。
+const expandedQuotes = reactive(new Set<number>())
+function toggleQuote(startMs: number) {
+  if (expandedQuotes.has(startMs)) expandedQuotes.delete(startMs)
+  else expandedQuotes.add(startMs)
+}
 function stamp(ms: number) {
   const s = Math.floor(ms / 1000)
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 }
 function bytes(n: number) {
   return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : (n / 1e6).toFixed(0) + ' MB'
+}
+// 列表里用相对时间便于扫读；完整时间放 title 提示里，悬停可见。
+function relativeTime(iso: string) {
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return ''
+  const diff = Date.now() - t
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`
+  return new Date(t).toLocaleDateString('zh-CN')
 }
 function applyTheme(value: boolean) {
   dark.value = value
@@ -354,7 +371,9 @@ onUnmounted(stopStream)
           </div>
           <div>
             <b>{{ tasks.filter((t) => t.status === 'FAILED').length }}</b
-            ><span>需要处理</span>
+            ><span title="转写或内容生成失败的任务，可在操作列重试"
+              >失败任务</span
+            >
           </div>
         </section>
         <section class="task-panel">
@@ -378,10 +397,10 @@ onUnmounted(stopStream)
             ><el-table-column label="视频" min-width="260"
               ><template #default="{ row }"
                 ><button class="file-link" @click="openTask(row)">
-                  <VideoPlay />{{ row.fileName }}</button
-                ><small
+                  <Film />{{ row.fileName }}</button
+                ><small :title="new Date(row.updatedAt).toLocaleString('zh-CN')"
                   >{{ bytes(row.sizeBytes) }} ·
-                  {{ new Date(row.updatedAt).toLocaleString('zh-CN') }}</small
+                  {{ relativeTime(row.updatedAt) }}</small
                 ></template
               ></el-table-column
             ><el-table-column label="阶段" width="130"
@@ -504,7 +523,7 @@ onUnmounted(stopStream)
             <p v-if="!selected.result" class="muted">
               完成内容生成后将显示章节。
             </p>
-            <button
+            <div
               v-for="chapter in selected.result?.chapters"
               :key="chapter.startMs"
               class="chapter"
@@ -512,20 +531,37 @@ onUnmounted(stopStream)
                 active:
                   currentMs >= chapter.startMs && currentMs < chapter.endMs
               }"
-              @click="seek(chapter.startMs)"
             >
-              <b>{{ stamp(chapter.startMs) }} · {{ chapter.title }}</b
-              ><small
-                >来源片段 #{{ chapter.sourceSegmentId
-                }}<template
-                  v-if="
-                    chapter.sourceEndSegmentId &&
-                    chapter.sourceEndSegmentId !== chapter.sourceSegmentId
-                  "
-                  >-#{{ chapter.sourceEndSegmentId }}</template
-                ></small
-              ><span class="chapter-quote">“{{ chapter.quote }}”</span>
-            </button>
+              <button class="chapter-head" @click="seek(chapter.startMs)">
+                <b>{{ stamp(chapter.startMs) }} · {{ chapter.title }}</b
+                ><small
+                  >来源片段 #{{ chapter.sourceSegmentId
+                  }}<template
+                    v-if="
+                      chapter.sourceEndSegmentId &&
+                      chapter.sourceEndSegmentId !== chapter.sourceSegmentId
+                    "
+                    >-#{{ chapter.sourceEndSegmentId }}</template
+                  ></small
+                >
+              </button>
+              <span
+                class="chapter-quote"
+                :class="{
+                  collapsed:
+                    chapter.quote.length > 110 &&
+                    !expandedQuotes.has(chapter.startMs)
+                }"
+                >“{{ chapter.quote }}”</span
+              >
+              <button
+                v-if="chapter.quote.length > 110"
+                class="quote-toggle"
+                @click="toggleQuote(chapter.startMs)"
+              >
+                {{ expandedQuotes.has(chapter.startMs) ? '收起' : '展开全文' }}
+              </button>
+            </div>
           </aside>
         </section>
         <section class="detail-grid">
