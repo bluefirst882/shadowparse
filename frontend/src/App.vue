@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Delete,
   Download,
+  EditPen,
   Film,
   Moon,
   RefreshRight,
@@ -11,6 +12,7 @@ import {
   SwitchButton,
   UploadFilled
 } from '@element-plus/icons-vue'
+import { ElMessageBox } from 'element-plus'
 import { ApiError, api, token, type Details, type Task } from './api'
 const tasks = ref<Task[]>([]),
   selected = ref<Details>(),
@@ -18,6 +20,7 @@ const tasks = ref<Task[]>([]),
   uploading = ref(false),
   uploadPercent = ref(0),
   message = ref(''),
+  pendingName = ref(''),
   query = ref(''),
   transcriptQuery = ref(''),
   currentMs = ref(0),
@@ -30,11 +33,15 @@ const authed = ref(Boolean(token.get())),
   authError = ref('')
 const form = reactive({ username: '', password: '' })
 const dark = ref(false)
-const visible = computed(() =>
-  tasks.value.filter((t) =>
-    t.fileName.toLowerCase().includes(query.value.toLowerCase())
+// 搜索同时匹配自定义任务名与原文件名：改名后老习惯（按文件名找）不受影响。
+const visible = computed(() => {
+  const keyword = query.value.toLowerCase()
+  return tasks.value.filter(
+    (t) =>
+      t.fileName.toLowerCase().includes(keyword) ||
+      (t.displayName ?? '').toLowerCase().includes(keyword)
   )
-)
+})
 const filteredTranscript = computed(
   () =>
     selected.value?.transcript.filter((s) =>
@@ -121,6 +128,10 @@ function describe(error: unknown, fallback: string) {
     ? `${error.message}（追踪号 ${error.traceId}）`
     : error.message
 }
+// 展示名优先用自定义名，未命名时回退原文件名。
+function displayName(task: Task) {
+  return task.displayName || task.fileName
+}
 function authMessage(error: unknown) {
   if (!(error instanceof ApiError))
     return error instanceof Error
@@ -154,10 +165,22 @@ async function choose(file: File) {
   uploading.value = true
   uploadPercent.value = 0
   try {
-    await api.upload(file, (sent) => {
+    const task = await api.upload(file, (sent) => {
       uploadPercent.value = Math.min(99, Math.round((sent / file.size) * 100))
     })
     uploadPercent.value = 100
+    // 导入时填了名称就顺手改名；改名失败不影响任务本身，提示用户稍后在列表里改。
+    const name = pendingName.value.trim()
+    pendingName.value = ''
+    if (name) {
+      try {
+        await api.rename(task.id, name)
+      } catch {
+        message.value = '任务已导入，但命名失败，可在列表中重新命名。'
+        await refresh()
+        return false
+      }
+    }
     message.value = '视频已加入本地处理队列。'
     await refresh()
   } catch (error) {
@@ -166,6 +189,36 @@ async function choose(file: File) {
     uploading.value = false
   }
   return false
+}
+// 改名弹窗：去空白后 1–100 字，与后端校验一致；取消直接放弃。
+async function renameTask(task: Task) {
+  let name: string
+  try {
+    const result = await ElMessageBox.prompt(
+      '仅修改展示名称，原文件名保留用于导出与溯源。',
+      '重命名任务',
+      {
+        inputValue: displayName(task),
+        inputValidator: (input: string) => {
+          const trimmed = (input ?? '').trim()
+          if (!trimmed) return '任务名称不能为空'
+          if (trimmed.length > 100) return '任务名称不能超过 100 字'
+          return true
+        },
+        confirmButtonText: '保存',
+        cancelButtonText: '取消'
+      }
+    )
+    name = result.value.trim()
+  } catch {
+    return
+  }
+  try {
+    await api.rename(task.id, name)
+    await refresh()
+  } catch (error) {
+    message.value = describe(error, '重命名失败，请稍后重试。')
+  }
 }
 async function action(
   task: Task,
@@ -227,7 +280,7 @@ function applyTheme(value: boolean) {
   localStorage.setItem('video-workbench-theme', value ? 'dark' : 'light')
 }
 function removeTask(task: Task) {
-  if (window.confirm(`确定删除“${task.fileName}”及其本地文件吗？`))
+  if (window.confirm(`确定删除“${displayName(task)}”及其本地文件吗？`))
     return action(task, 'remove')
 }
 let stream: EventSource | undefined
@@ -326,6 +379,14 @@ onUnmounted(stopStream)
             >
           </div>
           <div class="uploader">
+            <el-input
+              v-if="!uploading"
+              v-model="pendingName"
+              class="task-name-input"
+              placeholder="任务名称（可选，默认用文件名）"
+              maxlength="100"
+              clearable
+            />
             <el-upload
               :show-file-list="false"
               :before-upload="choose"
@@ -380,7 +441,7 @@ onUnmounted(stopStream)
           <div class="toolbar">
             <el-input
               v-model="query"
-              placeholder="搜索文件名"
+              placeholder="搜索任务名 / 文件名"
               clearable
             /><el-button
               :icon="RefreshRight"
@@ -397,8 +458,15 @@ onUnmounted(stopStream)
             ><el-table-column label="视频" min-width="260"
               ><template #default="{ row }"
                 ><button class="file-link" @click="openTask(row)">
-                  <Film />{{ row.fileName }}</button
-                ><small :title="new Date(row.updatedAt).toLocaleString('zh-CN')"
+                  <Film />{{ displayName(row) }}</button
+                ><el-button
+                  link
+                  :icon="EditPen"
+                  aria-label="重命名任务"
+                  class="rename-btn"
+                  @click="renameTask(row)"
+                /><small
+                  :title="new Date(row.updatedAt).toLocaleString('zh-CN')"
                   >{{ bytes(row.sizeBytes) }} ·
                   {{ relativeTime(row.updatedAt) }}</small
                 ></template
@@ -473,7 +541,16 @@ onUnmounted(stopStream)
             <el-button :icon="ArrowLeft" text @click="selected = undefined"
               >返回任务</el-button
             >
-            <h1>{{ selected.task.fileName }}</h1>
+            <h1>
+              {{ displayName(selected.task)
+              }}<el-button
+                link
+                :icon="EditPen"
+                aria-label="重命名任务"
+                class="rename-btn"
+                @click="renameTask(selected.task)"
+              />
+            </h1>
             <p>
               {{ bytes(selected.task.sizeBytes) }} ·
               {{ stageName[selected.task.stage] }} · 本地文件

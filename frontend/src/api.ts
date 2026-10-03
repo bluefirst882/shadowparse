@@ -3,6 +3,8 @@ export type Stage =
 export type Task = {
   id: string
   fileName: string
+  // 自定义任务名：为空时前端回退展示 fileName。
+  displayName?: string | null
   sizeBytes: number
   status: 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   stage: Stage
@@ -177,6 +179,13 @@ export const api = {
   retranscribe: (id: string) =>
     request<void>(`/tasks/${id}/retranscribe`, { method: 'POST' }),
   remove: (id: string) => request<void>(`/tasks/${id}`, { method: 'DELETE' }),
+  // 任务改名：只改展示名，原文件名保留（导出、溯源仍用它）。
+  rename: (id: string, name: string) =>
+    request<Task>(`/tasks/${id}/name`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    }),
   // 推送通道与视频流同理：EventSource 不能自定义请求头，因此以查询参数携带令牌。
   streamUrl: () =>
     `/api/tasks/stream?access_token=${encodeURIComponent(token.get() ?? '')}`,

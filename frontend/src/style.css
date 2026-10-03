@@ -217,7 +217,8 @@ small {
 .file-link {
   font: inherit;
   font-weight: 700;
-  display: flex;
+  /* inline-flex：让同一行还能放下旁边的改名按钮。 */
+  display: inline-flex;
   align-items: center;
   gap: 7px;
   border: 0;
@@ -231,6 +232,17 @@ small {
 }
 .file-link .el-icon {
   color: #1868db;
+}
+/* 列表行与详情标题旁的改名按钮：轻量图标，不抢文件名的视觉主次。 */
+.rename-btn {
+  margin-left: 6px;
+}
+.detail-head .rename-btn {
+  vertical-align: middle;
+}
+/* 导入区的可选任务名输入框：宽度与上传进度条对齐。 */
+.task-name-input {
+  width: 220px;
 }
 .detail-head {
   display: flex;
