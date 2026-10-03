@@ -143,6 +143,8 @@ body {
   max-width: 1360px;
   margin: auto;
   padding: 30px clamp(18px, 4vw, 54px) 56px;
+  /* el-main 自带 overflow:auto 会让它成为粘性后代的滚动容器（实际滚动在 document 上），sticky 因此全体失效。 */
+  overflow: visible;
 }
 .heading {
   display: flex;
@@ -150,7 +152,7 @@ body {
   align-items: end;
   gap: 16px;
   margin-bottom: 24px;
-  animation: rise 0.5s var(--ease-out) both;
+  animation: rise 0.5s var(--ease-out) backwards;
 }
 .auth-panel {
   max-width: 380px;
@@ -162,7 +164,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  animation: rise 0.5s var(--ease-out) both;
+  animation: rise 0.5s var(--ease-out) backwards;
 }
 .auth-panel h1 {
   font-size: 24px;
@@ -227,7 +229,7 @@ small {
 }
 .metrics div {
   padding: 18px 16px 15px;
-  animation: rise 0.5s var(--ease-out) both;
+  animation: rise 0.5s var(--ease-out) backwards;
 }
 .metrics div:nth-child(2) {
   animation-delay: 0.06s;
@@ -252,7 +254,7 @@ small {
   color: var(--muted);
 }
 .task-panel {
-  animation: rise 0.5s var(--ease-out) 0.1s both;
+  animation: rise 0.5s var(--ease-out) 0.1s backwards;
   overflow: hidden;
 }
 .toolbar {
@@ -329,7 +331,7 @@ small {
   justify-content: space-between;
   align-items: end;
   margin-bottom: 20px;
-  animation: rise 0.5s var(--ease-out) both;
+  animation: rise 0.5s var(--ease-out) backwards;
 }
 .detail-head h1 {
   font-size: clamp(24px, 2.6vw, 30px);
@@ -341,6 +343,77 @@ small {
 .muted {
   color: var(--muted);
 }
+/* 详情元信息行：状态胶囊 + 等宽字节数，替代原来的纯文本拼接。 */
+.detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin: 4px 0 0;
+}
+.mono {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: rgba(120, 138, 155, 0.12);
+}
+.status-chip i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.status-chip.ok {
+  color: #1f8a4d;
+  background: rgba(31, 138, 77, 0.11);
+}
+.status-chip.run {
+  color: var(--amber);
+  background: rgba(178, 106, 0, 0.1);
+}
+.status-chip.bad {
+  color: #c04545;
+  background: rgba(192, 69, 69, 0.1);
+}
+.dark .status-chip.ok {
+  color: #55c878;
+}
+.dark .status-chip.run {
+  color: var(--amber);
+}
+.dark .status-chip.bad {
+  color: #f07f7f;
+}
+/* 处理中：呼吸点——界面里唯一持续运动的元素，只留给「正在进行」。 */
+@keyframes breathe {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+}
+.status-chip.run i {
+  animation: breathe 1.6s ease-in-out infinite;
+}
+/* 右栏粘性跟随：长逐字稿滚动时章节/摘要不溜走；超高部分面板内部滚动。 */
+.watch-grid .chapter-panel,
+.detail-grid .result {
+  position: sticky;
+  top: 84px;
+  align-self: start;
+  max-height: calc(100vh - 104px);
+  overflow: auto;
+}
 .exports {
   display: flex;
   gap: 8px;
@@ -351,10 +424,12 @@ small {
   grid-template-columns: minmax(0, 1.65fr) minmax(260px, 0.75fr);
   gap: 18px;
   margin-top: 18px;
+  /* 顶对齐：章节列表再长也不把视频容器拉伸出黑底。 */
+  align-items: start;
 }
 .watch-grid,
 .detail-grid {
-  animation: rise 0.5s var(--ease-out) 0.08s both;
+  animation: rise 0.5s var(--ease-out) 0.08s backwards;
 }
 .video-wrap {
   position: relative;
@@ -442,6 +517,15 @@ small {
   border-color: var(--accent);
   background: var(--accent);
 }
+.chapter:hover::before {
+  background: var(--border-strong);
+}
+.chapter:hover .chapter-head b {
+  color: var(--accent);
+}
+.chapter-head b {
+  transition: color 0.2s var(--ease-out);
+}
 /* 点标题跳转进度，引文与展开按钮各自独立，避免嵌套按钮。 */
 .chapter-head {
   display: block;
@@ -527,9 +611,28 @@ small {
 .summary {
   line-height: 1.75;
 }
+/* 要点：mono 序号替代默认圆点，与时间码同一套「计数器」语言。 */
+.result ul {
+  list-style: none;
+  counter-reset: kp;
+  margin: 10px 0 0;
+  padding: 0;
+}
 .result li {
-  margin: 10px 0;
-  line-height: 1.55;
+  counter-increment: kp;
+  margin: 12px 0;
+  line-height: 1.6;
+  padding-left: 30px;
+  position: relative;
+}
+.result li::before {
+  content: counter(kp, decimal-leading-zero);
+  position: absolute;
+  left: 0;
+  top: 0.15em;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--amber);
 }
 @media (max-width: 760px) {
   .header {
@@ -561,6 +664,13 @@ small {
   .watch-grid,
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+  /* 单列布局下右栏不再粘性，避免盖住内容流。 */
+  .watch-grid .chapter-panel,
+  .detail-grid .result {
+    position: static;
+    max-height: none;
+    overflow: visible;
   }
   .video-wrap {
     min-height: 200px;

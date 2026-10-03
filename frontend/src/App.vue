@@ -551,9 +551,19 @@ onUnmounted(stopStream)
                 @click="renameTask(selected.task)"
               />
             </h1>
-            <p>
-              {{ bytes(selected.task.sizeBytes) }} ·
-              {{ stageName[selected.task.stage] }} · 本地文件
+            <p class="detail-meta">
+              <span
+                class="status-chip"
+                :class="{
+                  ok: selected.task.status === 'COMPLETED',
+                  run:
+                    selected.task.status === 'PROCESSING' ||
+                    selected.task.status === 'QUEUED',
+                  bad: selected.task.status === 'FAILED'
+                }"
+                ><i></i>{{ stageName[selected.task.stage] }}</span
+              ><span class="mono">{{ bytes(selected.task.sizeBytes) }}</span
+              ><span>本地文件</span>
             </p>
           </div>
           <div class="exports">
