@@ -111,6 +111,18 @@ class TaskService {
     return tasks.findOwned(id, ownerId).orElseThrow(() -> new AccessDeniedException("无权访问该任务"));
   }
 
+  /** 改名：只允许改自己的任务；名称去空白后 1–100 字。 */
+  VideoTask rename(String id, String ownerId, String name) {
+    String trimmed = name == null ? "" : name.trim();
+    if (trimmed.isEmpty()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "任务名称不能为空");
+    if (trimmed.length() > 100)
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "任务名称不能超过 100 字");
+    VideoTask task = get(id, ownerId);
+    if (!tasks.rename(task.id(), trimmed))
+      throw new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在");
+    return tasks.findOwned(id, ownerId).orElse(task);
+  }
+
   TaskDetails details(String id, String ownerId) {
     return new TaskDetails(get(id, ownerId), tasks.segments(id), tasks.result(id).orElse(null));
   }
@@ -161,6 +173,7 @@ class TaskService {
           new VideoTask(
               id,
               safeName(originalName),
+              null,
               target.toAbsolutePath().toString(),
               size,
               TaskStatus.QUEUED,
@@ -182,6 +195,7 @@ class TaskService {
         return new VideoTask(
             task.id(),
             task.fileName(),
+            task.displayName(),
             task.videoPath(),
             task.sizeBytes(),
             task.status(),

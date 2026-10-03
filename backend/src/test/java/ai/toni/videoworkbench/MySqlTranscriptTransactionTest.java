@@ -71,6 +71,7 @@ class MySqlTranscriptTransactionTest {
         new VideoTask(
             id,
             "transaction-test.mp4",
+            null,
             "test://" + id,
             0,
             TaskStatus.QUEUED,

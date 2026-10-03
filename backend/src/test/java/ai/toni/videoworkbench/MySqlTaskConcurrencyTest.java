@@ -47,6 +47,7 @@ class MySqlTaskConcurrencyTest {
         new VideoTask(
             id,
             "concurrency-test.mp4",
+            null,
             "test://" + id,
             0,
             TaskStatus.QUEUED,
@@ -134,6 +135,7 @@ class MySqlTaskConcurrencyTest {
     return new VideoTask(
         id,
         "lease-test.mp4",
+        null,
         "test://" + id,
         0,
         TaskStatus.QUEUED,

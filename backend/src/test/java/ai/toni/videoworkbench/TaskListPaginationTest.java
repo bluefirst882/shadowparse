@@ -139,6 +139,7 @@ class TaskListPaginationTest {
     return new VideoTask(
         id,
         "video.mp4",
+        null,
         "test://" + id,
         0,
         TaskStatus.QUEUED,

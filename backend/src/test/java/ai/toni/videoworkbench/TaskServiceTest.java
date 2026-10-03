@@ -253,6 +253,6 @@ class TaskServiceTest {
   private VideoTask task(String id, TaskStatus status) {
     Instant now = Instant.now();
     return new VideoTask(
-        id, "video.mp4", "video.mp4", 1, status, TaskStage.IMPORT, 0, null, now, now);
+        id, "video.mp4", null, "video.mp4", 1, status, TaskStage.IMPORT, 0, null, now, now);
   }
 }

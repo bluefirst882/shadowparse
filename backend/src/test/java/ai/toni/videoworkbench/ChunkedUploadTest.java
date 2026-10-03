@@ -49,6 +49,7 @@ class ChunkedUploadTest {
           id varchar(36) primary key,
           owner_id varchar(36) not null,
           file_name varchar(512) not null,
+          display_name varchar(200),
           video_path varchar(2048) not null,
           size_bytes bigint not null,
           status varchar(32) not null,

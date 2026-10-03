@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -120,6 +121,17 @@ class TaskController {
   VideoTask get(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
     return service.get(id, user.id());
   }
+
+  /** 任务改名：只动展示名，原文件名保留在 fileName（导出、转写溯源仍用它）。 */
+  @PatchMapping("/{id}/name")
+  VideoTask rename(
+      @PathVariable String id,
+      @RequestBody RenameRequest request,
+      @AuthenticationPrincipal AuthenticatedUser user) {
+    return service.rename(id, user.id(), request.name());
+  }
+
+  record RenameRequest(String name) {}
 
   @GetMapping("/{id}/details")
   TaskDetails details(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {

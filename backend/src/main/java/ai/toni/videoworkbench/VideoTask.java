@@ -5,6 +5,7 @@ import java.time.Instant;
 public record VideoTask(
     String id,
     String fileName,
+    String displayName,
     String videoPath,
     long sizeBytes,
     TaskStatus status,

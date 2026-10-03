@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -15,6 +16,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -143,6 +145,35 @@ class ApiErrorResponseTest {
                 .header(HttpHeaders.ORIGIN, "http://127.0.0.1:5174")
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
                 .content(new byte[] {1, 2, 3, 4}))
+        .andExpect(status().isOk())
+        .andExpect(
+            header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, "http://127.0.0.1:5174"));
+  }
+
+  @Test
+  void allowsCrossOriginRenameWithPatch() throws Exception {
+    // 任务改名走 PATCH：与 PUT 同理，方法不在 CORS 白名单里时带 Origin 的请求会 403，这里固定住。
+    when(service.rename(eq("task-1"), eq("user-a"), eq("新名字")))
+        .thenReturn(
+            new VideoTask(
+                "task-1",
+                "a.mp4",
+                "新名字",
+                "/storage/a.mp4",
+                1,
+                TaskStatus.COMPLETED,
+                TaskStage.COMPLETED,
+                100,
+                null,
+                Instant.now(),
+                Instant.now()));
+
+    mvc.perform(
+            patch("/api/tasks/task-1/name")
+                .header(HttpHeaders.AUTHORIZATION, bearer("user-a"))
+                .header(HttpHeaders.ORIGIN, "http://127.0.0.1:5174")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"新名字\"}"))
         .andExpect(status().isOk())
         .andExpect(
             header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, "http://127.0.0.1:5174"));

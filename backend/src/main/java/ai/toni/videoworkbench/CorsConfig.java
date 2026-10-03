@@ -15,8 +15,8 @@ class CorsConfig implements WebMvcConfigurer {
             "http://127.0.0.1:5173",
             "http://localhost:5174",
             "http://127.0.0.1:5174")
-        // PUT 是分片上传用的方法：浏览器对同源的写请求也会带 Origin 头，方法不在白名单里同样会被判成
-        // 「Invalid CORS request」而返回 403，所以在白名单里必须列全实际用到的动词。
-        .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS");
+        // PUT 是分片上传、PATCH 是任务改名用的方法：浏览器对同源的写请求也会带 Origin 头，
+        // 方法不在白名单里同样会被判成「Invalid CORS request」而返回 403，所以在白名单里必须列全实际用到的动词。
+        .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS");
   }
 }

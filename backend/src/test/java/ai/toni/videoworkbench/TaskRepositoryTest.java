@@ -75,6 +75,7 @@ class TaskRepositoryTest {
         new VideoTask(
             "task-1",
             "video.mp4",
+            null,
             "video.mp4",
             1,
             TaskStatus.QUEUED,
@@ -90,6 +91,7 @@ class TaskRepositoryTest {
             contains("insert into tasks(id,owner_id"),
             eq("task-1"),
             eq("user-a"),
+            any(),
             any(),
             any(),
             any(),

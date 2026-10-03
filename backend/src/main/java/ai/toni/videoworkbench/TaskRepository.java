@@ -82,10 +82,11 @@ class TaskRepository {
 
   void save(VideoTask t, String ownerId) {
     jdbc.update(
-        "insert into tasks(id,owner_id,file_name,video_path,size_bytes,status,stage,progress,error_message,created_at,updated_at) values(?,?,?,?,?,?,?,?,?,?,?)",
+        "insert into tasks(id,owner_id,file_name,display_name,video_path,size_bytes,status,stage,progress,error_message,created_at,updated_at) values(?,?,?,?,?,?,?,?,?,?,?,?)",
         t.id(),
         ownerId,
         t.fileName(),
+        t.displayName(),
         t.videoPath(),
         t.sizeBytes(),
         t.status().name(),
@@ -95,6 +96,14 @@ class TaskRepository {
         Timestamp.from(t.createdAt()),
         Timestamp.from(t.updatedAt()));
     events.taskChanged(t.id(), ownerId);
+  }
+
+  /** 改名只更新展示名，不动 updated_at：改名不是处理进度，不应影响相对时间展示。 */
+  boolean rename(String id, String displayName) {
+    boolean renamed =
+        jdbc.update("update tasks set display_name=? where id=?", displayName, id) == 1;
+    if (renamed) events.taskChanged(id);
+    return renamed;
   }
 
   void update(String id, TaskStatus s, TaskStage stage, int progress, String error) {
@@ -323,6 +332,7 @@ class TaskRepository {
     return new VideoTask(
         r.getString("id"),
         r.getString("file_name"),
+        r.getString("display_name"),
         r.getString("video_path"),
         r.getLong("size_bytes"),
         TaskStatus.valueOf(r.getString("status")),
