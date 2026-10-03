@@ -610,7 +610,9 @@ onUnmounted(stopStream)
               }"
             >
               <button class="chapter-head" @click="seek(chapter.startMs)">
-                <b>{{ stamp(chapter.startMs) }} · {{ chapter.title }}</b
+                <b
+                  ><span class="tc">{{ stamp(chapter.startMs) }}</span> ·
+                  {{ chapter.title }}</b
                 ><small
                   >来源片段 #{{ chapter.sourceSegmentId
                   }}<template
