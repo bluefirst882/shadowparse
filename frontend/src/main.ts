@@ -17,6 +17,10 @@ import 'element-plus/es/components/alert/style/css'
 import 'element-plus/es/components/button/style/css'
 import 'element-plus/es/components/container/style/css'
 import 'element-plus/es/components/input/style/css'
+// ElMessageBox 走命令式调用，模板里注册不到它，样式必须显式导入：
+// 缺了 overlay 的 position:fixed，弹窗会掉到文档流末尾（页面最底部）。
+import 'element-plus/es/components/message-box/style/css'
+import 'element-plus/es/components/overlay/style/css'
 import 'element-plus/es/components/progress/style/css'
 import 'element-plus/es/components/table/style/css'
 import 'element-plus/es/components/tag/style/css'
