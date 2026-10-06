@@ -1,11 +1,12 @@
 {
   "scripts": {
-    "eval:live": "node tools/eval-live.mjs",
-    "screenshot": "node screenshot.mjs",
-    "screenshot:workbench": "node frontend-screenshot.mjs",
-    "screenshot:grafana": "node grafana-screenshot.mjs",
-    "verify:realtime-upload": "node verify-realtime-upload.mjs",
-    "verify:sse": "node tools/sse-latency.mjs",
+    "eval:live": "node tools/measure/eval-live.mjs",
+    "screenshot": "node tools/capture/prototype.mjs",
+    "screenshot:workbench": "node tools/capture/frontend.mjs",
+    "screenshot:grafana": "node tools/capture/grafana.mjs",
+    "verify:realtime-upload": "node tools/verify/realtime-upload.mjs",
+    "verify:task-detail": "node tools/verify/task-detail.mjs",
+    "verify:sse": "node tools/measure/sse-latency.mjs",
     "format:check": "prettier --check .",
     "format:write": "prettier --write .",
     "check:python": "D:\\program\\anaconda\\python.exe -m py_compile workers/whisper_worker.py",

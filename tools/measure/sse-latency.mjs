@@ -1,7 +1,7 @@
 // P3-3 推送通道（SSE）的实测脚本：回答三个问题——未登录能不能订阅、别的账号能不能收到我的推送、
 // 任务变化到界面收到信号要多久。
 //
-// 用法：node tools/sse-latency.mjs          （需要 backend 已启动，默认 http://localhost:8081，可用 BASE 覆盖）
+// 用法：node tools/measure/sse-latency.mjs          （需要 backend 已启动，默认 http://localhost:8081，可用 BASE 覆盖）
 //
 // 做法：真实上传一个 4 秒样本，任务会依次走「本地转写 → 生成内容 → 已完成」，每次状态写入都会触发一次推送。
 // 每收到一次推送，立即回查任务的 updated_at，用它作为服务端写入时刻来算端到端延迟；跑完把这次上传的任务删掉。

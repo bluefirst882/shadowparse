@@ -3,7 +3,7 @@ import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 
 // 打开 Grafana 中已通过 provisioning 配置的面板并截图，作为可观测性证据。
-// 用法：node grafana-screenshot.mjs [输出文件名]
+// 用法：node tools/capture/grafana.mjs [输出文件名]
 const baseUrl = process.env.GRAFANA_URL ?? 'http://127.0.0.1:3000'
 const user = process.env.GRAFANA_ADMIN_USER ?? 'admin'
 const password = process.env.GRAFANA_ADMIN_PASSWORD ?? 'workbench'

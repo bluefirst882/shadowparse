@@ -1,5 +1,5 @@
 // P3-3 浏览器端验收：任务变化靠 SSE 推送（不再轮询）+ 分片上传进度条。
-// 用法：node verify-realtime-upload.mjs   （需要 backend/frontend 容器已启动）
+// 用法：node tools/verify/realtime-upload.mjs   （需要 backend/frontend 容器已启动）
 // 脚本自己准备测试文件（小文件取 k6 的 4 秒样本，大文件拼到 3 片），跑完把产生的任务删掉。
 import { chromium } from '@playwright/test'
 import { copyFile, mkdtemp, readFile, writeFile } from 'node:fs/promises'

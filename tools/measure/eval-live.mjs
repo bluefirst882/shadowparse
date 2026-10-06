@@ -4,8 +4,8 @@
 // 采样，回答「线上模型在当前提示词下的结构非法率是多少」。两处共用同一份提示词资源与 schema 文件，不复制提示词。
 //
 // 用法：
-//   node tools/eval-live.mjs             # 默认采样 3 次
-//   node tools/eval-live.mjs --samples=5
+//   node tools/measure/eval-live.mjs             # 默认采样 3 次
+//   node tools/measure/eval-live.mjs --samples=5
 //
 // 产出：
 //   backend/target/eval-live-report.md      采样统计（新口径 / 旧口径结构非法率、误收数）
@@ -225,7 +225,7 @@ async function main() {
   const report = [
     '# 摘要结构化输出真实调用抽样报告',
     '',
-    `> 由 \`tools/eval-live.mjs\` 生成：用 \`prompts/summarize.v1.*\` 与 \`schemas/summarize.json\` 对真实转写样本调用真实 API ${records.length} 次，`,
+    `> 由 \`tools/measure/eval-live.mjs\` 生成：用 \`prompts/summarize.v1.*\` 与 \`schemas/summarize.json\` 对真实转写样本调用真实 API ${records.length} 次，`,
     '> 对每次原始返回同时按新口径（本文本 → JSON → schema）与旧口径（解析成功 + 三个顶层字段非空）判定。',
     '',
     `- 模型：\`${model}\`，reasoning_effort=\`${reasoningEffort}\``,

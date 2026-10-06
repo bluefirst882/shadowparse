@@ -5,7 +5,7 @@ import path from 'node:path'
 
 const viewport = { width: 1440, height: 1000 }
 const pageUrl = pathToFileURL(
-  path.resolve('video-workbench-prototype.html')
+  path.resolve('docs/prototype/video-workbench-prototype.html')
 ).href
 const outputDir = path.resolve('artifacts')
 const outputPath = path.join(outputDir, 'video-workbench-prototype.png')
