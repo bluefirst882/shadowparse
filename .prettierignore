@@ -1,0 +1,25 @@
+# 依赖与构建产物
+node_modules/
+frontend/node_modules/
+backend/target/
+target/
+frontend/dist/
+
+# 自动生成的锁定文件：由包管理器维护，交给 Prettier 只会产生无意义冲突
+package-lock.json
+frontend/package-lock.json
+
+# 本地运行数据与 AI 工作区
+.workbuddy/
+.git/
+artifacts/
+data/
+models/
+storage/
+storage-real-cn/
+ops/k6/fixtures/
+ops/k6/results/
+
+# 压缩产物
+*.min.js
+*.min.css

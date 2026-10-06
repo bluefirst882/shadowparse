@@ -1,7 +1,9 @@
 data/
 storage/
+storage-real-cn/
 models/
 artifacts/
+.workbuddy/
 node_modules/
 .npm-cache/
 frontend/node_modules/
