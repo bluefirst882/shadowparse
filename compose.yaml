@@ -190,6 +190,20 @@ services:
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
       # 只用 GPU：显式要 cuda，容器没拿到 GPU 时启动即失败并留下明确报错，绝不静默回落 CPU。
       WHISPER_DEVICE: ${WHISPER_DEVICE:-cuda}
+      # ---- faster-whisper 新增项（词级时间戳 / 说话人分离）----
+      # 这几个必须显式列在这里才传得进容器：只在 .env 里写、而 compose 没转发的话，
+      # worker 读不到对应环境变量（表现为「明明配了却没效果」）。
+      # 词级时间戳：1 = 开（默认），0 = 只保留段级时间戳。
+      WHISPER_WORD_TIMESTAMPS: ${WHISPER_WORD_TIMESTAMPS:-1}
+      # 说话人分离开关：1 = 开（默认）。真正生效还需要下面的 HF token。
+      WHISPER_DIARIZE: ${WHISPER_DIARIZE:-1}
+      # pyannote 需要 HF token，且需先在 HF 接受 pyannote/speaker-diarization-3.1 与
+      # pyannote/segmentation-3.0 的许可。留空 = 不启用说话人分离（产物不含 speaker，不影响转写）。
+      WHISPER_HF_TOKEN: ${WHISPER_HF_TOKEN:-}
+      # 推理精度，留空时由 worker 按设备自选（cuda=int8_float16、cpu=int8）。
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-}
+      # 说话人分离模型，留空时 worker 用 pyannote/speaker-diarization-3.1。
+      WHISPER_DIARIZATION_MODEL: ${WHISPER_DIARIZATION_MODEL:-}
       # 转写在 worker 内串行执行（见 whisper_worker.py），CPU 线程数直接决定单次转写耗时。
       OMP_NUM_THREADS: ${WHISPER_CPU_THREADS:-4}
     volumes:
