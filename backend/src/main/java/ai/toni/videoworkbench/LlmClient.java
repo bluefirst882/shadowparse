@@ -2,6 +2,7 @@ package ai.toni.videoworkbench;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -46,6 +47,7 @@ class LlmClient {
   private final WorkbenchMetrics metrics;
   private final LlmUsageRepository usageLog;
   private final DownstreamResilience resilience;
+  private final LlmBudgetGuard budget;
   private final Duration summarizeTimeout;
   private final Duration translateTimeout;
 
@@ -54,6 +56,7 @@ class LlmClient {
       WorkbenchMetrics metrics,
       LlmUsageRepository usageLog,
       DownstreamResilience resilience,
+      LlmBudgetGuard budget,
       @Value("${workbench.llm.base-url}") String baseUrl,
       @Value("${workbench.llm.api-key}") String apiKey,
       @Value("${workbench.llm.model}") String model,
@@ -65,6 +68,7 @@ class LlmClient {
     this.metrics = metrics;
     this.usageLog = usageLog;
     this.resilience = resilience;
+    this.budget = budget;
     this.baseUrl = baseUrl.replaceAll("/+$", "");
     this.apiKey = apiKey;
     this.model = model;
@@ -75,7 +79,7 @@ class LlmClient {
   }
 
   /**
-   * 生成摘要、要点与章节。
+   * 生成摘要、要点与章节（无画面文本的旧入口）。
    *
    * <p>{@code previousError} 为上一次尝试未通过校验的失败原因（首次调用为 {@code null}）。重试时把失败原因
    * 回灌提示词：同一个提示词重试大概率仍产出同样的幻觉，只有把「上次错在哪」告诉模型，重试才有意义。
@@ -85,10 +89,28 @@ class LlmClient {
   TaskResult summarize(
       String taskId, List<TranscriptSegment> transcript, int maxInputChars, String previousError)
       throws Exception {
+    return summarize(taskId, transcript, List.of(), maxInputChars, previousError);
+  }
+
+  /**
+   * 带画面文本的摘要：OCR 文本按时间归并进分块，只作上下文参考。
+   *
+   * <p>画面文字从不进入校验链路——章节的 {@code sourceSegmentId} 与 {@code quote} 闸门仍然只认转写片段， OCR 有识别错误，不能当引文来源（见
+   * docs/改造方案与优先级.md P1）。
+   */
+  TaskResult summarize(
+      String taskId,
+      List<TranscriptSegment> transcript,
+      List<FrameText> frameTexts,
+      int maxInputChars,
+      String previousError)
+      throws Exception {
     List<List<TranscriptSegment>> chunks = partitionTranscript(transcript, maxInputChars);
+    List<String> visualBlocks = attachFrameTexts(chunks, frameTexts);
     List<TaskResult> partialResults = new ArrayList<>();
-    for (List<TranscriptSegment> chunk : chunks)
-      partialResults.add(summarizeChunk(taskId, chunk, previousError));
+    for (int index = 0; index < chunks.size(); index++)
+      partialResults.add(
+          summarizeChunk(taskId, chunks.get(index), visualBlocks.get(index), previousError));
     // chapters 由各块结果确定性合并排序，不交给模型重写：模型重写可能改动 sourceSegmentId 或时间，
     // 破坏服务端的时间轴与引文校验。只有 summary / keyPoints 这类纯文本才适合二次合并。
     List<Chapter> chapters =
@@ -184,8 +206,57 @@ class LlmClient {
     return chunks;
   }
 
+  /**
+   * 把画面文本按时间归并进分块：落在分块时间范围内的帧文本归属该分块，首尾之外的帧归最近的分块。
+   *
+   * <p>返回与 {@code chunks} 等长的列表，每项是拼好的「画面文字」段（无帧文本时为空串）， 直接填进提示词的 {@code {{visualText}}} 占位符。
+   */
+  static List<String> attachFrameTexts(
+      List<List<TranscriptSegment>> chunks, List<FrameText> frameTexts) {
+    List<String> blocks = new ArrayList<>(chunks.size());
+    if (chunks.isEmpty()) return blocks;
+    List<List<String>> grouped = new ArrayList<>(chunks.size());
+    for (int index = 0; index < chunks.size(); index++) grouped.add(new ArrayList<>());
+    for (FrameText frame : frameTexts) {
+      if (frame.text() == null || frame.text().isBlank()) continue;
+      int target = -1;
+      for (int index = 0; index < chunks.size(); index++) {
+        List<TranscriptSegment> chunk = chunks.get(index);
+        long start = chunk.getFirst().startMs();
+        long end = chunk.get(chunk.size() - 1).endMs();
+        if (frame.tsMs() >= start && frame.tsMs() <= end) {
+          target = index;
+          break;
+        }
+        if (frame.tsMs() < start && target == -1) target = index;
+      }
+      if (target == -1) target = chunks.size() - 1;
+      grouped.get(target).add("[" + timestamp(frame.tsMs()) + "] " + frame.text().strip());
+    }
+    for (List<String> group : grouped) {
+      if (group.isEmpty()) {
+        blocks.add("");
+        continue;
+      }
+      blocks.add("画面文字（OCR 识别，可能有误，仅作上下文）：\n" + String.join("\n", group) + "\n");
+    }
+    return blocks;
+  }
+
+  /** 毫秒时间戳的 mm:ss（超一小时含小时段），与导出文稿的展示习惯一致。 */
+  static String timestamp(long tsMs) {
+    long totalSeconds = Math.max(0, tsMs) / 1000;
+    long hours = totalSeconds / 3600;
+    long minutes = (totalSeconds % 3600) / 60;
+    long seconds = totalSeconds % 60;
+    return hours > 0
+        ? String.format("%d:%02d:%02d", hours, minutes, seconds)
+        : String.format("%02d:%02d", minutes, seconds);
+  }
+
   private TaskResult summarizeChunk(
-      String taskId, List<TranscriptSegment> transcript, String previousError) throws Exception {
+      String taskId, List<TranscriptSegment> transcript, String visualText, String previousError)
+      throws Exception {
     String source =
         transcript.stream().map(LlmClient::sourceLine).collect(Collectors.joining("\n"));
     String prompt =
@@ -195,6 +266,8 @@ class LlmClient {
                 LlmJsonSchema.SUMMARIZE.json(),
                 "retryHint",
                 retryHint(previousError),
+                "visualText",
+                visualText == null ? "" : visualText,
                 "input",
                 source));
     JsonNode content =
@@ -220,6 +293,9 @@ class LlmClient {
         : "上次输出未通过校验：" + previousError + "，请修正后重新返回完整 JSON。\n";
   }
 
+  /** 单批翻译的重试次数：LLM 偶发漏条是输出质量问题，重试同一批通常就能拿到完整结果。 */
+  private static final int TRANSLATE_BATCH_ATTEMPTS = 3;
+
   List<TranscriptSegment> translateToChinese(String taskId, List<TranscriptSegment> transcript)
       throws Exception {
     Map<Long, String> translations = new HashMap<>();
@@ -230,17 +306,29 @@ class LlmClient {
           chunk.stream()
               .map(s -> "[id=" + s.id() + "] " + s.text())
               .collect(Collectors.joining("\n"));
-      String prompt =
-          PromptLibrary.TRANSLATE.user(
-              Map.of("schema", LlmJsonSchema.TRANSLATE.json(), "input", source));
-      JsonNode result =
-          requestJson(
-              taskId, "translate", PromptLibrary.TRANSLATE, prompt, LlmJsonSchema.TRANSLATE);
-      for (JsonNode item : result.path("translations"))
-        translations.put(item.path("id").asLong(), item.path("translation").asText().trim());
-      if (chunk.stream()
-          .anyMatch(s -> !translations.containsKey(s.id()) || translations.get(s.id()).isBlank()))
-        throw new IllegalStateException("翻译服务未返回完整结果（本批应返回 " + chunk.size() + " 条）");
+      // 单批不完整只重试该批（模型漏条是偶发的），重试把整批八条都要一遍，补齐后再进下一批；
+      // 次数用完仍缺条才放弃——此前 27 批的翻译成果都在 translations 里，不因一批而前功尽弃。
+      IllegalStateException incomplete = null;
+      for (int attempt = 0; attempt < TRANSLATE_BATCH_ATTEMPTS; attempt++) {
+        String prompt =
+            PromptLibrary.TRANSLATE.user(
+                Map.of("schema", LlmJsonSchema.TRANSLATE.json(), "input", source));
+        JsonNode result =
+            requestJson(
+                taskId, "translate", PromptLibrary.TRANSLATE, prompt, LlmJsonSchema.TRANSLATE);
+        for (JsonNode item : result.path("translations"))
+          translations.put(item.path("id").asLong(), item.path("translation").asText().trim());
+        boolean complete =
+            chunk.stream()
+                .allMatch(
+                    s -> translations.containsKey(s.id()) && !translations.get(s.id()).isBlank());
+        if (complete) {
+          incomplete = null;
+          break;
+        }
+        incomplete = new IllegalStateException("翻译服务未返回完整结果（本批应返回 " + chunk.size() + " 条）");
+      }
+      if (incomplete != null) throw incomplete;
     }
     if (transcript.stream().anyMatch(s -> !translations.containsKey(s.id())))
       throw new IllegalStateException("翻译服务未返回完整结果");
@@ -253,9 +341,15 @@ class LlmClient {
   }
 
   /**
-   * 发起一次结构化请求：先过容错外壳（并发隔板 + 熔断器），再走模型降级链。
+   * 发起一次结构化请求：先做预算检查，再过容错外壳（速率限制 + 并发隔板 + 熔断器），最后走模型降级链。
    *
-   * <p>熔断打开或隔板已满时请求根本没发出去，归为瞬时故障交给队列退避重试；这类拒绝**不走**降级链， 因为备用模型同样会被同一个熔断器挡住，重试只是把 3 次失败拖成 6
+   * <p>预算检查刻意放在容错外壳<b>之前</b>：预算超限不是下游故障，放进熔断器的计数里会把 「钱花完了」误判成「服务坏了」而打开熔断器，让后续无关调用也被拦。
+   *
+   * <p>预算超限的处理是降级续跑（见 docs/改造方案与优先级.md P0 决策 #3）：把调用切到廉价档模型， 质量有损但任务当日可用；只有廉价档不可用时才抛 {@link
+   * BudgetExhaustedException}（非瞬时故障， 任务 FAILED 而不是无限重试）。降级的调用在账目里带 {@code budget_fallback}
+   * 标记，可事后统计。
+   *
+   * <p>熔断打开、隔板已满或速率超限时请求根本没发出去，归为瞬时故障交给队列退避重试；这类拒绝**不走**降级链， 因为备用模型同样会被同一组本地护栏挡住，重试只是把 3 次失败拖成 6
    * 次。超时取本操作配置的 {@code timeout} （见 {@code workbench.llm.timeout-seconds} / {@code
    * translate-timeout-seconds}），由 HTTP 客户端强制。
    *
@@ -270,11 +364,39 @@ class LlmClient {
       LlmJsonSchema.Schema schema)
       throws Exception {
     Duration timeout = PromptLibrary.TRANSLATE == prompt ? translateTimeout : summarizeTimeout;
+    List<String> models = modelChain();
+    boolean budgetFallback = false;
+    if (budget.overBudget(taskId)) {
+      String cheap = budget.cheapModel();
+      if (cheap.isBlank() || cheap.equals(models.get(0)))
+        throw new BudgetExhaustedException(
+            "当日 AI 预算已用完，且未配置更廉价的降级模型（workbench.llm.budget-fallback-model）");
+      models = List.of(cheap);
+      budgetFallback = true;
+      metrics.recordLlmBudgetFallback();
+      log.warn("当日 LLM 预算已超限，本次调用降级到廉价档模型 {}：taskId={} operation={}", cheap, taskId, operation);
+    }
+    List<String> finalModels = models;
+    boolean finalBudgetFallback = budgetFallback;
     try {
       return resilience.call(
           DownstreamResilience.Target.LLM,
-          () -> requestJsonUnprotected(taskId, operation, prompt, userPrompt, schema, timeout));
+          () ->
+              requestJsonUnprotected(
+                  taskId,
+                  operation,
+                  prompt,
+                  userPrompt,
+                  schema,
+                  timeout,
+                  finalModels,
+                  finalBudgetFallback));
     } catch (Exception ex) {
+      if (ex instanceof RequestNotPermitted) {
+        metrics.recordLlmRateLimitRejection();
+        throw new TransientFailure(
+            TransientFailure.LLM_RATE_LIMITED, "内容服务调用超过本地速率限制（令牌桶无可用许可），本次未发起请求，稍后自动重试", ex);
+      }
       if (DownstreamResilience.isRejected(ex))
         throw new TransientFailure(
             TransientFailure.LLM_UNAVAILABLE,
@@ -290,14 +412,16 @@ class LlmClient {
       PromptLibrary.Prompt prompt,
       String userPrompt,
       LlmJsonSchema.Schema schema,
-      Duration timeout)
+      Duration timeout,
+      List<String> models,
+      boolean budgetFallback)
       throws Exception {
-    List<String> models = modelChain();
     Exception failure = null;
     for (int index = 0; index < models.size(); index++) {
       String current = models.get(index);
       try {
-        return callOnce(taskId, current, operation, prompt, userPrompt, schema, timeout);
+        return callOnce(
+            taskId, current, operation, prompt, userPrompt, schema, timeout, budgetFallback);
       } catch (Exception ex) {
         failure = ex;
         if (index + 1 < models.size()) {
@@ -323,7 +447,8 @@ class LlmClient {
       PromptLibrary.Prompt prompt,
       String userPrompt,
       LlmJsonSchema.Schema schema,
-      Duration timeout)
+      Duration timeout,
+      boolean budgetFallback)
       throws Exception {
     // DeepSeek 官方 API 目前不支持 response_format=json_schema（实测返回 400），
     // 所以用 json_object 保证「一定是合法 JSON」，字段级结构由提示词内的 schema + 下方本地校验承担。
@@ -346,7 +471,8 @@ class LlmClient {
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
             .build();
-    JsonNode response = send(request, "内容服务", taskId, operation, prompt.id(), currentModel);
+    JsonNode response =
+        send(request, "内容服务", taskId, operation, prompt.id(), currentModel, budgetFallback);
     String content = response.path("choices").path(0).path("message").path("content").asText();
     StructuredOutput parsed = parseStructured(json, content, schema);
     if (!parsed.ok()) throw outputFailure(operation, parsed.reason(), parsed.message());
@@ -417,7 +543,8 @@ class LlmClient {
       String taskId,
       String operation,
       String promptId,
-      String currentModel)
+      String currentModel,
+      boolean budgetFallback)
       throws Exception {
     boolean success = false;
     try {
@@ -427,7 +554,7 @@ class LlmClient {
             response.statusCode(),
             service + "返回 HTTP " + response.statusCode() + "：" + shortBody(response.body()));
       JsonNode body = json.readTree(response.body());
-      recordUsage(taskId, operation, promptId, currentModel, body);
+      recordUsage(taskId, operation, promptId, currentModel, budgetFallback, body);
       success = true;
       return body;
     } finally {
@@ -441,7 +568,12 @@ class LlmClient {
    * <p>记账发生在结构校验之前：只要能拿到响应体，token 就已经真实消耗，结构非法只影响这次输出能不能用。
    */
   private void recordUsage(
-      String taskId, String operation, String promptId, String currentModel, JsonNode response) {
+      String taskId,
+      String operation,
+      String promptId,
+      String currentModel,
+      boolean budgetFallback,
+      JsonNode response) {
     JsonNode usage = response.path("usage");
     if (!usage.isObject()) return;
     long promptTokens = usage.path("prompt_tokens").asLong();
@@ -449,7 +581,13 @@ class LlmClient {
     metrics.recordLlmTokens(currentModel, promptTokens, completionTokens);
     usageLog.record(
         new LlmUsageRepository.LlmCall(
-            taskId, operation, promptId, currentModel, promptTokens, completionTokens));
+            taskId,
+            operation,
+            promptId,
+            currentModel,
+            budgetFallback,
+            promptTokens,
+            completionTokens));
   }
 
   /** LLM 服务返回非 2xx；{@code status} 用于降级原因分类。 */
@@ -463,6 +601,17 @@ class LlmClient {
 
     int status() {
       return status;
+    }
+  }
+
+  /**
+   * 当日预算已用完且无廉价档可降级（非瞬时故障）。
+   *
+   * <p>不是「等一会儿会好」——在预算重置（自然日切换）之前重试多少次都会以同样方式失败， 因此按非瞬时异常处理：任务 FAILED、消息进死信队列，失败原因对用户可见。
+   */
+  static class BudgetExhaustedException extends IllegalStateException {
+    BudgetExhaustedException(String message) {
+      super(message);
     }
   }
 

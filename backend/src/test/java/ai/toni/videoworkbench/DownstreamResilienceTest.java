@@ -12,6 +12,9 @@ import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.ratelimiter.RateLimiterConfig;
+import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
+import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.Callable;
@@ -41,7 +44,8 @@ class DownstreamResilienceTest {
             .waitDurationInOpenState(BUDGET)
             .build());
     DownstreamResilience resilience =
-        new DownstreamResilience(breakers, BulkheadRegistry.ofDefaults());
+        new DownstreamResilience(
+            breakers, BulkheadRegistry.ofDefaults(), RateLimiterRegistry.ofDefaults());
     AtomicInteger calls = new AtomicInteger();
     Callable<String> failing =
         () -> {
@@ -74,7 +78,8 @@ class DownstreamResilienceTest {
         "llm",
         BulkheadConfig.custom().maxConcurrentCalls(1).maxWaitDuration(Duration.ZERO).build());
     DownstreamResilience resilience =
-        new DownstreamResilience(CircuitBreakerRegistry.ofDefaults(), bulkheads);
+        new DownstreamResilience(
+            CircuitBreakerRegistry.ofDefaults(), bulkheads, RateLimiterRegistry.ofDefaults());
     CountDownLatch entered = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -121,5 +126,31 @@ class DownstreamResilienceTest {
                       throw new IOException("服务返回 500");
                     }));
     assertTrue(!DownstreamResilience.isRejected(failure), "下游自己报的错不是本地拒绝，不能按退避重试处理");
+  }
+
+  @Test
+  void rejectsInsteadOfSendingWhenLlmRateLimitIsExhausted() throws Exception {
+    // 每小时只放行 1 个许可：第一次调用用掉配额，第二次必须被速率限制拒绝。
+    RateLimiterRegistry limiters =
+        RateLimiterRegistry.of(
+            RateLimiterConfig.custom()
+                .limitForPeriod(1)
+                .limitRefreshPeriod(Duration.ofHours(1))
+                .timeoutDuration(Duration.ZERO)
+                .build());
+    CircuitBreakerRegistry breakers = CircuitBreakerRegistry.ofDefaults();
+    DownstreamResilience resilience =
+        new DownstreamResilience(breakers, BulkheadRegistry.ofDefaults(), limiters);
+
+    assertEquals("first", resilience.call(DownstreamResilience.Target.LLM, () -> "first"));
+    RequestNotPermitted rejected =
+        assertThrows(
+            RequestNotPermitted.class,
+            () -> resilience.call(DownstreamResilience.Target.LLM, () -> "second"));
+
+    assertTrue(DownstreamResilience.isRejected(rejected), "速率超限应按本地拒绝（瞬时故障）处理");
+    // 速率限制是最外层护栏：被拒的调用不该推进到熔断器，更不该被记成下游失败。
+    assertEquals(0.0, breakers.circuitBreaker("llm").getMetrics().getNumberOfNotPermittedCalls());
+    assertEquals(0.0, breakers.circuitBreaker("llm").getMetrics().getNumberOfFailedCalls());
   }
 }

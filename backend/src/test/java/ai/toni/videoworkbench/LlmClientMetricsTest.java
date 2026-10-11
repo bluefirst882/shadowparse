@@ -62,7 +62,7 @@ class LlmClientMetricsTest {
     Mockito.verify(usageLog)
         .record(
             new LlmUsageRepository.LlmCall(
-                "task-1", "summarize", "summarize.v1", "test-model", 123, 45));
+                "task-1", "summarize", "summarize.v2", "test-model", false, 123, 45));
   }
 
   @Test
@@ -103,6 +103,8 @@ class LlmClientMetricsTest {
         new WorkbenchMetrics(registry),
         usageLog,
         DownstreamResilience.withDefaults(),
+        new LlmBudgetGuard(
+            Mockito.mock(LlmUsageRepository.class), new WorkbenchMetrics(registry), 0, 0, ""),
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         "test-model",

@@ -28,16 +28,60 @@ class LlmUsageRepository {
   void record(LlmCall call) {
     try {
       jdbc.update(
-          "insert into llm_calls(task_id,operation,prompt_id,model,prompt_tokens,completion_tokens,created_at) values(?,?,?,?,?,?,?)",
+          "insert into llm_calls(task_id,operation,prompt_id,model,budget_fallback,prompt_tokens,completion_tokens,created_at) values(?,?,?,?,?,?,?,?)",
           call.taskId(),
           call.operation(),
           call.promptId(),
           call.model(),
+          call.budgetFallback() ? 1 : 0,
           call.promptTokens(),
           call.completionTokens(),
           Timestamp.from(Instant.now()));
     } catch (RuntimeException ex) {
       log.warn("LLM 用量记账失败：{}", ex.getMessage());
+    }
+  }
+
+  /**
+   * 当日（自 {@code startOfDay} 起）全部任务的 token 总量，预算守卫的全局口径。
+   *
+   * <p>守卫是「账本驱动的护栏」，账本读不到时不拦路：数据库不可达按 0 处理并告警， 与「记账失败不回滚成功调用」是同一条哲学——此刻整条流水线本来就跑不通，护栏不需要单独把事搞砸。
+   */
+  long totalTokensSince(Instant startOfDay) {
+    try {
+      Long value =
+          jdbc.queryForObject(
+              "select coalesce(sum(prompt_tokens + completion_tokens),0) from llm_calls where created_at >= ?",
+              Long.class,
+              Timestamp.from(startOfDay));
+      return value == null ? 0 : value;
+    } catch (RuntimeException ex) {
+      log.warn("读取当日 LLM 总用量失败，预算检查本次放行：{}", ex.getMessage());
+      return 0;
+    }
+  }
+
+  /**
+   * 当日某个任务所属用户的 token 总量，预算守卫的用户级口径。
+   *
+   * <p>llm_calls 没有冗余 owner 字段，经 tasks 关联取归属；任务不存在（如单元测试传入任意 id）按 0 处理。
+   */
+  long userTokensSince(String taskId, Instant startOfDay) {
+    try {
+      Long value =
+          jdbc.queryForObject(
+              """
+              select coalesce(sum(l.prompt_tokens + l.completion_tokens),0)
+              from llm_calls l join tasks t on t.id = l.task_id
+              where t.owner_id = (select owner_id from tasks where id = ?) and l.created_at >= ?
+              """,
+              Long.class,
+              taskId,
+              Timestamp.from(startOfDay));
+      return value == null ? 0 : value;
+    } catch (RuntimeException ex) {
+      log.warn("读取用户当日 LLM 用量失败，预算检查本次放行：{}", ex.getMessage());
+      return 0;
     }
   }
 
@@ -61,12 +105,13 @@ class LlmUsageRepository {
         taskId);
   }
 
-  /** 一次 LLM 调用的账目：谁（任务）、用哪版提示词、实际哪个模型、花了多少 token。 */
+  /** 一次 LLM 调用的账目：谁（任务）、用哪版提示词、实际哪个模型、是否预算降级、花了多少 token。 */
   record LlmCall(
       String taskId,
       String operation,
       String promptId,
       String model,
+      boolean budgetFallback,
       long promptTokens,
       long completionTokens) {}
 

@@ -75,7 +75,17 @@ class TaskRenameTest {
             60000,
             Mockito.mock(TaskQueue.class),
             new TaskLease(repository, Mockito.mock(TaskQueue.class), metrics, "test-instance", 90),
-            DownstreamResilience.withDefaults());
+            DownstreamResilience.withDefaults(),
+            new VisualExtractionService(
+                Mockito.mock(FrameRepository.class),
+                path -> "",
+                metrics,
+                "ffmpeg",
+                storage.toString(),
+                200,
+                0.3,
+                30,
+                1));
   }
 
   @AfterEach

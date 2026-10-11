@@ -18,6 +18,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistry;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DuplicateKeyException;
 
 /** 消费者的确认语义与失败分流：瞬时故障退避重试、超限进死信、非瞬时故障不浪费重试额度。 */
 class TaskQueueConsumerTest {
@@ -81,6 +82,26 @@ class TaskQueueConsumerTest {
     consumer().handle(message("task-1", 1), channel, DELIVERY_TAG);
 
     verify(queue).publishRetry("task-1", 2, 5_000L);
+    verify(channel).basicAck(DELIVERY_TAG, false);
+  }
+
+  /**
+   * 约束冲突是确定性失败（生产事故：同 ts 两帧撞 uk_video_frames_task_ts 唯一键），等多久都还会撞， 不进重试；数据库是通的，任务能标成 FAILED
+   * 留档后进死信队列。
+   */
+  @Test
+  void failsFastWithoutRetryOnDataIntegrityViolation() throws Exception {
+    Mockito.doThrow(
+            new DuplicateKeyException(
+                "Duplicate entry 'task-1-0' for key 'video_frames.uk_video_frames_task_ts'"))
+        .when(service)
+        .process("task-1", 1);
+
+    consumer().handle(message("task-1", 1), channel, DELIVERY_TAG);
+
+    verify(service).markRetryExhausted(eq("task-1"), eq(1), eq("database_constraint"), anyString());
+    verify(queue).publishDeadLetter("task-1", "database_constraint");
+    verify(queue, never()).publishRetry(anyString(), anyInt(), anyLong());
     verify(channel).basicAck(DELIVERY_TAG, false);
   }
 

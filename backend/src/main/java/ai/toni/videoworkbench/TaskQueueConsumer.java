@@ -15,6 +15,7 @@ import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistry;
 import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Component;
 
@@ -84,6 +85,12 @@ class TaskQueueConsumer {
       channel.basicAck(deliveryTag, false);
     } catch (TransientFailure ex) {
       retryLater(taskId, attempt, ex.reason(), ex.getMessage(), channel, deliveryTag);
+    } catch (DataIntegrityViolationException ex) {
+      // 约束冲突（如同一个 (task_id, ts_ms) 插两行）是确定性的：等多久、重试多少次都还会撞同一堵墙。
+      // 数据库本身是通的（写都写进来了才撞的约束），所以这里能成功把任务标成 FAILED 留档。
+      log.error("任务处理遇到数据库约束冲突，不重试直接失败：taskId={}", taskId, ex);
+      markExhausted(taskId, attempt, "database_constraint", ex.getMessage());
+      deadLetter(taskId, "database_constraint", ex.getMessage(), channel, deliveryTag);
     } catch (DataAccessException ex) {
       // 数据库不可达属于瞬时故障，但此时连「把任务改回 QUEUED」都写不进去，只能靠重试投递再来一次。
       retryLater(

@@ -17,8 +17,13 @@ import java.util.regex.Pattern;
  */
 final class PromptLibrary {
 
-  /** 摘要：单块生成 summary / keyPoints / chapters。 */
-  static final Prompt SUMMARIZE = load("summarize", "v1");
+  /**
+   * 摘要：单块生成 summary / keyPoints / chapters。
+   *
+   * <p>v2 相对 v1 增加了 {@code {{visualText}}} 占位符（P1 视觉分支的 OCR 上下文，无画面文本时传空串）。 v1
+   * 保留在资源目录里作为历史版本，成本归因仍能按版本对比。
+   */
+  static final Prompt SUMMARIZE = load("summarize", "v2");
 
   /** 跨块合并：只整合纯文本，不产出 chapters。 */
   static final Prompt MERGE = load("merge", "v1");

@@ -221,6 +221,8 @@ class LlmClientFallbackTest {
         new WorkbenchMetrics(registry),
         Mockito.mock(LlmUsageRepository.class),
         DownstreamResilience.withDefaults(),
+        new LlmBudgetGuard(
+            Mockito.mock(LlmUsageRepository.class), new WorkbenchMetrics(registry), 0, 0, ""),
         "http://127.0.0.1:" + server.getAddress().getPort(),
         "test-key",
         primary,

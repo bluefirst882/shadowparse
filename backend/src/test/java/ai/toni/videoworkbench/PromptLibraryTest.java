@@ -16,13 +16,23 @@ class PromptLibraryTest {
     String prompt =
         PromptLibrary.SUMMARIZE.user(
             Map.of(
-                "schema", LlmJsonSchema.SUMMARIZE.json(), "retryHint", "", "input", "[id=1] 你好"));
+                "schema",
+                LlmJsonSchema.SUMMARIZE.json(),
+                "retryHint",
+                "",
+                "visualText",
+                "",
+                "input",
+                "[id=1] 你好"));
 
-    assertEquals("summarize.v1", PromptLibrary.SUMMARIZE.id());
+    // v2 相对 v1 只增加 {{visualText}} 占位符（P1 视觉分支），无画面文本时传空串，行为与 v1 等价。
+    assertEquals("summarize.v2", PromptLibrary.SUMMARIZE.id());
     assertTrue(PromptLibrary.SUMMARIZE.system().contains("只返回合法 JSON"));
+    assertTrue(PromptLibrary.SUMMARIZE.system().contains("OCR"), "v2 必须声明画面文字不可作为引文来源");
     assertTrue(prompt.contains(LlmJsonSchema.SUMMARIZE.json()), "提示词必须内嵌 schema 原文");
     assertTrue(prompt.contains("[id=1] 你好"), "提示词必须包含输入文本");
     assertFalse(prompt.contains("{{"), "占位符必须全部被替换");
+    assertFalse(prompt.contains("画面文字"), "无画面文本时不应出现画面文字段");
     assertFalse(prompt.contains("上次输出未通过校验"), "首次调用不应出现重试提示");
   }
 

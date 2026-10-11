@@ -6,6 +6,9 @@ import io.github.resilience4j.bulkhead.BulkheadRegistry;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.ratelimiter.RateLimiter;
+import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
+import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 import java.util.Locale;
 import java.util.concurrent.Callable;
 import org.springframework.stereotype.Component;
@@ -43,25 +46,36 @@ class DownstreamResilience {
 
   private final CircuitBreakerRegistry circuitBreakers;
   private final BulkheadRegistry bulkheads;
+  private final RateLimiterRegistry rateLimiters;
 
-  DownstreamResilience(CircuitBreakerRegistry circuitBreakers, BulkheadRegistry bulkheads) {
+  DownstreamResilience(
+      CircuitBreakerRegistry circuitBreakers,
+      BulkheadRegistry bulkheads,
+      RateLimiterRegistry rateLimiters) {
     this.circuitBreakers = circuitBreakers;
     this.bulkheads = bulkheads;
+    this.rateLimiters = rateLimiters;
   }
 
   /**
    * 用默认注册表构造一个不受 application.yml 约束的实例（阈值宽松，实际不会拦路）。
    *
-   * <p>给不起 Spring 上下文的调用方用：单元测试只需要一个「不拦路」的壳，不该被迫复制一份生产阈值。
+   * <p>给不起 Spring 上下文的调用方用：单元测试只需要一个「不拦路」的壳，不该被迫复制一份生产阈值。 默认 RateLimiter 的刷新周期是 500ns，等效于不限速。
    */
   static DownstreamResilience withDefaults() {
     return new DownstreamResilience(
-        CircuitBreakerRegistry.ofDefaults(), BulkheadRegistry.ofDefaults());
+        CircuitBreakerRegistry.ofDefaults(),
+        BulkheadRegistry.ofDefaults(),
+        RateLimiterRegistry.ofDefaults());
   }
 
   /**
    * 执行一次下游调用。
    *
+   * <p>护栏从外到内依次是：<b>速率限制（仅 LLM）→ 并发隔板 → 熔断器</b>。速率限制是最便宜、最外层的本地检查：
+   * 隔板管「同时多少个」，熔断管「下游坏了怎么办」，速率限制管「单位时间发多少个」—— 三者正交，缺哪个都不行（理由见 docs/改造方案与优先级.md P0）。
+   *
+   * @throws RequestNotPermitted 速率超限（仅 LLM），本次没有真正发起请求
    * @throws CallNotPermittedException 熔断器已打开，本次没有真正发起请求
    * @throws BulkheadFullException 并发隔板已满，本次没有真正发起请求
    */
@@ -70,6 +84,8 @@ class DownstreamResilience {
         Bulkhead.decorateCallable(
             bulkheads.bulkhead(target.id()),
             CircuitBreaker.decorateCallable(circuitBreakers.circuitBreaker(target.id()), action));
+    if (target == Target.LLM)
+      guarded = RateLimiter.decorateCallable(rateLimiters.rateLimiter(target.id()), guarded);
     return guarded.call();
   }
 
@@ -79,6 +95,8 @@ class DownstreamResilience {
    * <p>这类失败请求根本没打出去，语义上是「等一下再试」而不是「下游返回了错误」，调用方据此归入瞬时故障走退避重试。
    */
   static boolean isRejected(Throwable ex) {
-    return ex instanceof CallNotPermittedException || ex instanceof BulkheadFullException;
+    return ex instanceof CallNotPermittedException
+        || ex instanceof BulkheadFullException
+        || ex instanceof RequestNotPermitted;
   }
 }

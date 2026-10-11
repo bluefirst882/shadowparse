@@ -42,3 +42,21 @@ jobs:
       - run: python -m py_compile workers/whisper_worker.py
       - run: npm ci
       - run: npm run format:check
+      # 每次提交都验证镜像能 build，避免 Dockerfile 悄悄坏掉才在发布时才发现。
+      # whisper 是 CUDA/GPU 大镜像，本地 build 即可，CI 不构建。
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build backend image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          tags: shadowparse-backend:ci
+          cache-from: type=gha
+      - name: Build frontend image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          tags: shadowparse-frontend:ci
+          cache-from: type=gha

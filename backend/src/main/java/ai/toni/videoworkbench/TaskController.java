@@ -3,6 +3,7 @@ package ai.toni.videoworkbench;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.List;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
@@ -136,6 +137,29 @@ class TaskController {
   @GetMapping("/{id}/details")
   TaskDetails details(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
     return service.details(id, user.id());
+  }
+
+  /** 关键帧列表（时间升序）；缩略图与 OCR 文本一起返回，前端据此渲染可点击的帧条。 */
+  @GetMapping("/{id}/frames")
+  List<FrameView> frames(@PathVariable String id, @AuthenticationPrincipal AuthenticatedUser user) {
+    return service.frames(id, user.id()).stream()
+        .map(frame -> new FrameView(frame.tsMs(), frame.ocrText()))
+        .toList();
+  }
+
+  /** 帧视图：帧图走单独的图片端点（浏览器自动带 cookie/token 拉取），列表只带数据。 */
+  record FrameView(long tsMs, String ocrText) {}
+
+  @GetMapping(value = "/{id}/frames/{tsMs}/image", produces = MediaType.IMAGE_JPEG_VALUE)
+  ResponseEntity<Resource> frameImage(
+      @PathVariable String id,
+      @PathVariable long tsMs,
+      @AuthenticationPrincipal AuthenticatedUser user)
+      throws IOException {
+    java.nio.file.Path image = service.frameImage(id, user.id(), tsMs);
+    return ResponseEntity.ok()
+        .contentLength(java.nio.file.Files.size(image))
+        .body(new org.springframework.core.io.FileSystemResource(image));
   }
 
   /** 导出单个视频的 LLM 用量与成本，按提示词版本与实际模型分行。 */

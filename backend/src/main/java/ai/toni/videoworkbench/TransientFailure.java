@@ -19,6 +19,9 @@ class TransientFailure extends RuntimeException {
   /** LLM 调用被熔断器或并发隔板拒绝（请求没发出去）。 */
   static final String LLM_UNAVAILABLE = "llm_unavailable";
 
+  /** LLM 调用超过本地速率限制（令牌桶无可用许可，请求没发出去）。 */
+  static final String LLM_RATE_LIMITED = "llm_rate_limited";
+
   private final String reason;
 
   TransientFailure(String reason, String message) {

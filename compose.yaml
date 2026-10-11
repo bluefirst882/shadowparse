@@ -181,6 +181,13 @@ services:
       WHISPER_MODEL_DIR: /models
       WHISPER_PORT: '8090'
       WHISPER_MAX_UPLOAD_BYTES: ${WHISPER_MAX_UPLOAD_BYTES:-2147483648}
+      # 转写前先按能量把静音切掉（见 whisper_worker.py 的 vad_regions）：
+      # 录屏音频里大片「样本值恒为 0」的静音会让 Whisper 解出幻觉并复制到后面每个窗口。
+      # 判为静音的帧阈值（dBFS），录得偏轻时往上调（如 -50），环境噪声大时往下调（如 -35）。
+      WHISPER_VAD: ${WHISPER_VAD:-1}
+      WHISPER_VAD_THRESHOLD_DB: ${WHISPER_VAD_THRESHOLD_DB:--45}
+      # 全局默认解码语言：留空 = 自动检测（推荐）。设成 zh / en 会钉死语言，混语种素材会被按一种硬解。
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
       # 只用 GPU：显式要 cuda，容器没拿到 GPU 时启动即失败并留下明确报错，绝不静默回落 CPU。
       WHISPER_DEVICE: ${WHISPER_DEVICE:-cuda}
       # 转写在 worker 内串行执行（见 whisper_worker.py），CPU 线程数直接决定单次转写耗时。

@@ -84,7 +84,17 @@ class ChunkedUploadTest {
             60000,
             queue,
             new TaskLease(repository, queue, metrics, "test-instance", 90),
-            DownstreamResilience.withDefaults());
+            DownstreamResilience.withDefaults(),
+            new VisualExtractionService(
+                Mockito.mock(FrameRepository.class),
+                path -> "",
+                metrics,
+                "ffmpeg",
+                storage.toString(),
+                200,
+                0.3,
+                30,
+                1));
     uploads = new ChunkedUploadService(service, storage.toString(), 20L * CHUNK);
   }
 

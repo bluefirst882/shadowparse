@@ -70,6 +70,17 @@ resilience4j:
       whisper:
         max-concurrent-calls: ${WORKBENCH_WHISPER_MAX_CONCURRENT:1}
         max-wait-duration: 0
+  # 速率限制（仅 LLM）：隔板管「同时多少个」，熔断管「下游坏了怎么办」，这里管「单位时间发多少个」。
+  # 预算管「一共花多少」（见 workbench.llm.daily-token-budget），四者正交。
+  ratelimiter:
+    instances:
+      llm:
+        # 每分钟最多发起的 LLM 请求次数（一个分块一次请求，长视频分块多，靠它挡住突发）。
+        limit-for-period: ${WORKBENCH_LLM_RATE_LIMIT_RPM:30}
+        limit-refresh-period: 60s
+        # 快速失败：消费并发=1，阻塞等待许可会卡死整条流水线；拒绝按瞬时故障走队列退避重试。
+        timeout-duration: 0s
+        register-health-indicator: false
 logging:
   pattern:
     console: '%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] %logger{36} - %msg%n'
@@ -93,6 +104,19 @@ workbench:
     heartbeat-interval-millis: ${WORKBENCH_LEASE_HEARTBEAT_MILLIS:20000}
     sweep-interval-millis: ${WORKBENCH_LEASE_SWEEP_MILLIS:30000}
   ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
+  # 视觉分支（P1）：场景检测抽关键帧 + OCR 画面文字。OCR 整路失败只降级为「无画面文本」，不阻断主链路。
+  visual:
+    # 单任务关键帧上限，超出后按时间轴均匀抽样。
+    max-frames: ${WORKBENCH_VISUAL_MAX_FRAMES:200}
+    # ffmpeg 场景变化检测阈值：高于此值判定为画面切换。
+    scene-threshold: ${WORKBENCH_VISUAL_SCENE_THRESHOLD:0.3}
+    # 保底采样间隔（秒）：静态板书没有场景切换，靠它保证每 30s 至少一帧。
+    fallback-sampling-seconds: ${WORKBENCH_VISUAL_FALLBACK_SECONDS:30}
+  # OCR 引擎（P1 决策 #4：Tesseract 5.4 先行，接口抽象保留换 PaddleOCR 的路径）。
+  ocr:
+    command: ${OCR_COMMAND:tesseract}
+    languages: ${OCR_LANGUAGES:chi_sim+eng}
+    timeout-seconds: ${OCR_TIMEOUT_SECONDS:30}
   security:
     jwt-secret: ${WORKBENCH_JWT_SECRET:}
     token-ttl-hours: ${WORKBENCH_TOKEN_TTL_HOURS:24}
@@ -106,6 +130,14 @@ workbench:
     fallback-model: ${LLM_FALLBACK_MODEL:deepseek-v4-pro}
     reasoning-effort: ${LLM_REASONING_EFFORT:low}
     max-input-chars: ${LLM_MAX_INPUT_CHARS:60000}
+    # 日 token 预算（prompt+completion 之和，自然日按系统时区）：0 表示不启用。
+    # 超限不失败：自动切到 budget-fallback-model 续跑（见 docs/改造方案与优先级.md P0 决策 #3），
+    # 降级调用在 llm_calls 里带 budget_fallback 标记；预算按「用户记账、全局兜底」设计，
+    # 用户级预算未启用时只有全局闸生效（先自用，将来少数人共用时打开即可，无需改代码）。
+    daily-token-budget: ${LLM_DAILY_TOKEN_BUDGET:0}
+    user-daily-token-budget: ${LLM_USER_DAILY_TOKEN_BUDGET:0}
+    # 预算超限后使用的廉价档模型；留空表示超预算任务直接 FAILED（原因「当日 AI 预算已用完」）。
+    budget-fallback-model: ${LLM_BUDGET_FALLBACK_MODEL:}
     # 单次请求的硬超时，由 HTTP 客户端强制（不是 Resilience4j TimeLimiter，理由见 DownstreamResilience）：
     # 摘要/合并与翻译的输出长度差一个数量级，所以分开配置。
     timeout-seconds: ${WORKBENCH_LLM_TIMEOUT_SECONDS:90}

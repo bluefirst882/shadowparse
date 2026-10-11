@@ -16,7 +16,8 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 /**
  * 用内存数据库验证 P1-4 的用量落库与成本折算：按提示词版本 + 模型分行、只统计本任务、缺单价不给金额。
  *
- * <p>表结构对齐 {@code V4__add_llm_calls.sql}，让聚合 SQL 在测试里跑的是与线上同一份写法。
+ * <p>表结构对齐 {@code V4__add_llm_calls.sql} + {@code V7__add_llm_calls_budget_fallback.sql}， 让聚合 SQL
+ * 在测试里跑的是与线上同一份写法。
  */
 class LlmCostServiceTest {
   private JdbcTemplate jdbc;
@@ -37,6 +38,7 @@ class LlmCostServiceTest {
           operation varchar(32) not null,
           prompt_id varchar(64) not null,
           model varchar(64) not null,
+          budget_fallback tinyint not null default 0,
           prompt_tokens int not null,
           completion_tokens int not null,
           created_at timestamp(3) not null
@@ -115,7 +117,7 @@ class LlmCostServiceTest {
         () ->
             broken.record(
                 new LlmUsageRepository.LlmCall(
-                    "task-1", "summarize", "summarize.v1", "flash", 1, 1)));
+                    "task-1", "summarize", "summarize.v1", "flash", false, 1, 1)));
   }
 
   private void record(
@@ -126,6 +128,7 @@ class LlmCostServiceTest {
             promptId.startsWith("translate") ? "translate" : "summarize",
             promptId,
             model,
+            false,
             promptTokens,
             completionTokens));
   }

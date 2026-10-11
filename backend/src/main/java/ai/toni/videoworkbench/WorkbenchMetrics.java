@@ -25,6 +25,11 @@ class WorkbenchMetrics {
   static final String LLM_OUTPUT_FAILURES = "workbench.llm.output_failures";
   static final String LLM_VALIDATION_FAILURES = "workbench.llm.validation_failures";
   static final String LLM_TOKENS = "workbench.llm.tokens";
+  static final String LLM_RATE_LIMIT_REJECTIONS = "workbench.llm.rate_limit_rejections";
+  static final String LLM_BUDGET_FALLBACKS = "workbench.llm.budget_fallbacks";
+  static final String LLM_BUDGET_USED_TODAY = "workbench.llm.budget_used_today";
+  static final String LLM_BUDGET_LIMIT = "workbench.llm.budget_limit";
+  static final String VISUAL_OCR_FAILURES = "workbench.visual.ocr_failures";
   static final String QUEUE_DEPTH = "workbench.queue.depth";
   static final String QUEUE_WAIT = "workbench.queue.wait";
   static final String QUEUE_PUBLISH_FAILURES = "workbench.queue.publish_failures";
@@ -95,6 +100,46 @@ class WorkbenchMetrics {
       registry
           .counter(LLM_TOKENS, "type", "completion", "model", model)
           .increment(completionTokens);
+  }
+
+  /**
+   * LLM 调用被本地速率限制（令牌桶）拒绝的次数，请求没有真正发出去。
+   *
+   * <p>与熔断/隔板拒绝分开打点：后者是「下游坏了」，前者是「花得太快」，处置动作不同（分别见队列退避与预算降级）。
+   */
+  void recordLlmRateLimitRejection() {
+    registry.counter(LLM_RATE_LIMIT_REJECTIONS).increment();
+  }
+
+  /** 当日预算超限后把调用切换到廉价档模型的次数；观测「预算外降级发生了多少次」。 */
+  void recordLlmBudgetFallback() {
+    registry.counter(LLM_BUDGET_FALLBACKS).increment();
+  }
+
+  /**
+   * 绑定「当日已用 LLM token 总量」数据源，供 Grafana 与预算值相除算出水位。
+   *
+   * <p>数据源在 Prometheus 抓取时才查询数据库；账本读不到时守卫按 0 统计（见 {@link LlmUsageRepository}
+   * 的口径说明），预算降级由调用路径上的检查承担，抓取线程不碰异常。
+   */
+  void bindBudgetUsedToday(Supplier<Number> usedSupplier) {
+    Gauge.builder(LLM_BUDGET_USED_TODAY, usedSupplier, supplier -> supplier.get().doubleValue())
+        .description("当日已消耗的 LLM token 总量（prompt + completion）")
+        .strongReference(true)
+        .register(registry);
+  }
+
+  /** 绑定「日 token 预算上限」数据源；0 表示未启用预算（Grafana 里据此区分「无预算」与「0 预算」）。 */
+  void bindBudgetLimit(Supplier<Number> limitSupplier) {
+    Gauge.builder(LLM_BUDGET_LIMIT, limitSupplier, supplier -> supplier.get().doubleValue())
+        .description("日 token 预算上限，0 表示未启用")
+        .strongReference(true)
+        .register(registry);
+  }
+
+  /** OCR 整路失败（引擎不可用或全部帧识别失败）的次数；帧保留、产物按「无画面文本」降级。 */
+  void recordVisualOcrFailure() {
+    registry.counter(VISUAL_OCR_FAILURES).increment();
   }
 
   /** 绑定「当前排队任务数」数据源；换队列实现时只改这一处绑定。 */
