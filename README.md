@@ -268,10 +268,13 @@ mel 被 clamp 成常数，`no_speech_prob` 反而输出 0（等于「100% 有语
 | `WHISPER_COMPUTE_TYPE`      | cuda=`int8_float16` / cpu=`int8`   | 推理精度；显存紧张可显式设 `int8`                         |
 | `WHISPER_DIARIZATION_MODEL` | `pyannote/speaker-diarization-3.1` | 分离模型，一般无需改动                                    |
 
-启用说话人分离需三步：① 取消 `workers/requirements.txt` 里 `pyannote.pipeline` 的注释并重建 whisper 镜像；
-② 在 HuggingFace 接受 `pyannote/speaker-diarization-3.1` 的许可；③ 配置 `WHISPER_HF_TOKEN`。
+启用说话人分离只需两步（pyannote 已内置在 whisper 镜像里，无需再改依赖）：
+① 在 HuggingFace 接受 `pyannote/speaker-diarization-3.1` 的许可；② 配置 `WHISPER_HF_TOKEN`。
 任一步缺失，分离自动退化为「无说话人」，转写结果照常落库与导出。前端逐字稿会按说话人着色，
 词级时间戳可点击定位到对应画面帧。
+
+> 注：段级 `speaker` 取「与整段时间重叠最大」的说话人，词级 `speaker` 逐词独立判定。
+> 若一段里夹着另一人的短促插话，可能出现段级是 A、末尾一两个词是 B 的情况——这是词级更精细，不是错配。
 
 ### 2. 启动全部服务
 

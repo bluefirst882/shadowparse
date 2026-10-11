@@ -22,7 +22,7 @@
 - **导出**：SRT / Markdown 导出自动带 `[说话人]` 标签；JSON 经 Jackson 自动带新字段。
 - **前端**：逐字稿按说话人着色，词级时间戳可点击定位（`@click.stop="seek(w.startMs)"`）。
 - **配置**：`.env.example` 与 README 增补 `WHISPER_WORD_TIMESTAMPS` / `WHISPER_DIARIZE` / `WHISPER_HF_TOKEN` / `WHISPER_COMPUTE_TYPE` / `WHISPER_DIARIZATION_MODEL`。
-  - 说话人分离需先接受 HF 许可、配置 token，并取消 `requirements.txt` 中 pyannote 行的注释后重建镜像。
+  - 说话人分离需先接受 HF 许可并配置 token（`996c754` 起 pyannote 已内置进 whisper 镜像，无需再改依赖）。
 
 ## 3. LLM 成本护栏 + v2 摘要提示词 + 下游容错；CI 工作流与文档（`ddca951`）
 
@@ -78,7 +78,7 @@
 | 产物       | 6 段 / 78 个词，全部段均带词级时间戳                                 |
 | 一致性断言 | 修复前 2 项失败 → 修复后 **0 失败**（词⊆段、无零长度词、词时间单调） |
 
-### 4.5 修复 verify CI 的镜像构建 context（验证工作流）
+### 4.6 修复 verify CI 的镜像构建 context（验证工作流）
 
 - 现象：修完 Prettier 后 `验证` 工作流仍红，失败发生在 `Build backend image (no push)`，
   报 `failed to calculate checksum ... "/backend/src": not found`。
@@ -90,19 +90,50 @@
   与 `compose.yaml` 里 backend 服务的构建方式保持一致；frontend 步骤补上显式 `file:`。
 - 本地已按 CI 的同一配置验证两个镜像都能构建：backend（2m30s）与 frontend（29s）均成功。
 
+### 4.7 补齐 pyannote 运行期依赖 matplotlib（装法有坑）
+
+- **现象**：镜像里 `pyannote` 能 import、但真正分离时抛 `No module named 'matplotlib'`——
+  `pyannote/audio/pipelines/speaker_verification.py` 经 speechbrain 间接依赖它，属于**运行期**才触发的依赖，
+  自检那句 `import pyannote.audio` 不会暴露。
+- **更坑的地方**：单独敲 `pip install matplotlib` 会把 `numpy` 重新解析回 **2.x**，
+  于是刚修好的 `AttributeError: np.NaN was removed in the NumPy 2.0` 又回来了——
+  装一个依赖反而打坏另一个，来回横跳。
+- **处理**：把 `matplotlib==3.9.2` 与已有的 `numpy==1.26.4 scipy==1.13.1 huggingface-hub==0.25.2`
+  写进**同一条** `pip install`，让 pip 一次性联合求解；整组仍放在 `pyannote.audio==3.1.1` 之后安装。
+  `workers/requirements.txt` 同步增补，并在两处注释里写明「必须同批安装」的原因。
+
+### 4.8 说话人分离端到端验证结果
+
+在同一条 30 秒英文片段（RTX 4060 / CUDA）上，用**重建后的镜像本身**（不再用临时容器补装依赖）跑通：
+
+| 项目         | 结果                                                                   |
+| ------------ | ---------------------------------------------------------------------- |
+| 段级说话人   | `SPEAKER_00`（0.12–8.44，提问方）、`SPEAKER_02`（10.60–29.98，回答方） |
+| 词级说话人   | `SPEAKER_00` / `SPEAKER_01` / `SPEAKER_02`                             |
+| 产物规模     | 6 段 / 78 个词，与未开分离时**完全一致**                               |
+| 一致性断言   | 0 失败（词⊆段、无零长度词、词时间单调）                                |
+| 关闭分离对照 | 剥离 `speaker` 字段后与开启时**逐字节相同** → 纯增量、无回归           |
+
+- 访谈场景切分符合直觉：前两段是记者提问（`SPEAKER_00`），后四段是选手回答（`SPEAKER_02`）。
+- `SPEAKER_01` 只出现在词级：`seg[3]`（14.54–20.34，段级 `SPEAKER_02`）末尾
+  `20.16–20.34` 的两个词被判为 `SPEAKER_01`。这是段尾约 0.18s 的短促插话／重叠语音，
+  段级按「重叠最大」归给了 `SPEAKER_02`，而词级逐词判定更精细，属于**预期行为而非错配**；
+  README 已注明该差异。
+
 ---
 
 ## 启用说明（速查）
 
-| 能力         | 默认 | 开启方式                                                                                                      |
-| ------------ | ---- | ------------------------------------------------------------------------------------------------------------- |
-| 词级时间戳   | 开   | `WHISPER_WORD_TIMESTAMPS=1`（默认即开）                                                                       |
-| 说话人分离   | 关   | 接受 HF 许可 → 设 `WHISPER_HF_TOKEN` → `WHISPER_DIARIZE=1` → 取消 `requirements.txt` pyannote 注释 → 重建镜像 |
-| 视觉 OCR     | 开   | 容器内已带 `tesseract`（chi_sim+eng）                                                                         |
-| LLM 成本护栏 | 开   | 由 `LlmBudgetGuard` 自动生效，见 `application.yml`                                                            |
+| 能力         | 默认 | 开启方式                                                                                      |
+| ------------ | ---- | --------------------------------------------------------------------------------------------- |
+| 词级时间戳   | 开   | `WHISPER_WORD_TIMESTAMPS=1`（默认即开）                                                       |
+| 说话人分离   | 开   | pyannote 已内置镜像，只需：接受 HF 许可 → 设 `WHISPER_HF_TOKEN`（`WHISPER_DIARIZE=1` 为默认） |
+| 视觉 OCR     | 开   | 容器内已带 `tesseract`（chi_sim+eng）                                                         |
+| LLM 成本护栏 | 开   | 由 `LlmBudgetGuard` 自动生效，见 `application.yml`                                            |
 
 ## 已知限制
 
-- 说话人分离依赖 pyannote 权重与 HF token，未配置时转写产物不含说话人（不影响主链路）。
+- 说话人分离依赖 pyannote 权重与 HF token（还需先在 HF 接受 `pyannote/speaker-diarization-3.1` 许可），未配置时转写产物不含说话人（不影响主链路）。
+- 段级 `speaker` 按「与整段重叠最大」判定，词级 `speaker` 逐词独立判定；段中夹有他人短促插话时，可能出现段级为 A、个别词为 B。这是词级更精细的表现，不是错配。
 - faster-whisper 模型默认从 HuggingFace Hub 拉取并缓存到 `WHISPER_MODEL_DIR`；存量 `openai-whisper` 格式的 `large-v3-turbo.pt` 不会被直接复用，首跑会重新下载并转换为 CTranslate2 格式缓存。
 - whisper 仅用 GPU：容器未拿到 GPU 时启动即失败并明确报错，不静默回落 CPU。
