@@ -210,8 +210,14 @@ Whisper 权重不打进镜像，挂载一个模型目录即可（已有缓存就
 WHISPER_MODELS_DIR=E:/model/whisper
 ```
 
-不设置时默认用仓库内的 `models/whisper`。目录里没有 `large-v3-turbo.pt` 时，
-`whisper` 容器会在首次启动时把权重下载到该目录，`docker compose logs -f whisper` 可以看到进度。
+不设置时默认用仓库内的 `models/whisper`。首次启动会从 HuggingFace Hub 拉取 `turbo`
+（即 large-v3-turbo）并转成 **CTranslate2 格式**缓存在该目录（约 1.6GB，进度用
+`docker compose logs -f whisper` 看），之后离线可直接复用。
+
+注意缓存按 HuggingFace 的目录结构存放（`models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`
+
+- `blobs`），与旧版 openai-whisper 那种单一的 `large-v3-turbo.pt` **不通用**——
+  升级到 faster-whisper 后不再读取该文件，已存在的旧文件可以删掉省磁盘。
 
 ### 转写前的静音处理（VAD）
 

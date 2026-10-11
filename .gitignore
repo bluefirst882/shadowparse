@@ -5,6 +5,9 @@ models/
 artifacts/
 .workbuddy/
 node_modules/
+
+# 排查/验证时临时拷出来的源码副本（纯草稿、非项目文件，正本已在 git 里，勿入库）
+verify_tmp/
 .npm-cache/
 frontend/node_modules/
 frontend/dist/
