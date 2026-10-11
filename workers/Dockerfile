@@ -35,11 +35,27 @@ COPY workers/runtime-requirements.txt /tmp/runtime-requirements.txt
 #    不 pin 的话 pip 会解析到最新 av，转写时 decode_audio 直接抛
 #    TypeError: open() got an unexpected keyword argument 'metadata_errors'。
 #    实测 16.0.0 仍支持该签名，17+ 不支持。
+# 4) torchaudio 必须与 torch 同版本、同 CUDA 构建（2.5.1+cu124）：pyannote.audio 依赖它，
+#    若放任 pip 从 PyPI 解析会装到 CPU 版并顺带把 CUDA torch 顶掉，所以先钉死。
+# 5) pyannote.audio 本体（说话人分离，可选）：真正生效还需在 HF 接受
+#    pyannote/speaker-diarization-3.1 与 pyannote/segmentation-3.0 许可，并配置 WHISPER_HF_TOKEN。
+# 6) pyannote.audio 3.1.1 早于 numpy 2：它自己的 core/inference.py 用了 np.NaN
+#    （numpy 2 已移除），所以 numpy 必须钉回 1.26.4；而新版 scipy 反过来要 numpy 2
+#    （用了 np.long），所以 scipy 要一并钉回 1.13.1。
+#    同理 pyannote 还在调 hf_hub_download(use_auth_token=...)，该参数在
+#    huggingface-hub >= 1.0 被移除（改名 token），故 hub 钉 0.25.2。
+#    这三个必须放在 pyannote 之后装，否则会被 pyannote 的依赖重新顶掉
+#    （实测放任解析会得到 numpy 2.5.4 / scipy 新版 / hub 2.x，全部对不上）。
+# 注：下面 RUN 内部不能再写 `# 注释`——多行 RUN 是整段交给 /bin/sh 的，
+#     `#` 会让下一行开头的 `&&` 变成语法错误（实测踩过）。
 RUN pip install --index-url ${TORCH_INDEX} torch==${TORCH_VERSION} \
-    && pip install -r /tmp/runtime-requirements.txt numpy==2.1.3 \
+    && pip install -r /tmp/runtime-requirements.txt \
     && pip install tiktoken==0.9.0 tqdm==4.67.1 more-itertools==10.8.0 regex==2024.11.6 \
     && pip install av==16.0.0 faster-whisper==1.2.1 \
-    && python -c "import torch, faster_whisper; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+    && pip install --index-url ${TORCH_INDEX} torchaudio==${TORCH_VERSION} \
+    && pip install pyannote.audio==3.1.1 \
+    && pip install numpy==1.26.4 scipy==1.13.1 huggingface-hub==0.25.2 \
+    && python -c "import torch, faster_whisper, pyannote.audio; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 
 COPY workers/whisper_worker.py /app/whisper_worker.py
 
