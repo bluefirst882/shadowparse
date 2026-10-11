@@ -46,10 +46,14 @@ jobs:
       # whisper 是 CUDA/GPU 大镜像，本地 build 即可，CI 不构建。
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+      # 注意：backend / whisper 的 Dockerfile 里 COPY 的是仓库根目录相对路径
+      # （如 COPY backend/pom.xml .），所以 context 必须是仓库根 "." 再单独指定 file；
+      # frontend 的 Dockerfile 走 frontend/ 目录自身做 context（与 compose.yaml 保持一致）。
       - name: Build backend image (no push)
         uses: docker/build-push-action@v6
         with:
-          context: ./backend
+          context: .
+          file: ./backend/Dockerfile
           push: false
           tags: shadowparse-backend:ci
           cache-from: type=gha
@@ -57,6 +61,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
+          file: ./frontend/Dockerfile
           push: false
           tags: shadowparse-frontend:ci
           cache-from: type=gha

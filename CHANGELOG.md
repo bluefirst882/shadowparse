@@ -78,6 +78,18 @@
 | 产物       | 6 段 / 78 个词，全部段均带词级时间戳                                 |
 | 一致性断言 | 修复前 2 项失败 → 修复后 **0 失败**（词⊆段、无零长度词、词时间单调） |
 
+### 4.5 修复 verify CI 的镜像构建 context（验证工作流）
+
+- 现象：修完 Prettier 后 `验证` 工作流仍红，失败发生在 `Build backend image (no push)`，
+  报 `failed to calculate checksum ... "/backend/src": not found`。
+- 原因：该步骤把 `context` 设成了 `./backend`，但 `backend/Dockerfile` 里写的是
+  **仓库根目录**相对路径（`COPY backend/pom.xml .` / `COPY backend/src ./src`）；
+  而 `frontend/Dockerfile` 恰好相反，用的是 `frontend/` 目录自身做 context。
+  两者口径不一致，`./backend` 这个 context 下自然找不到 `backend/backend/src`。
+- 处理：`verify.yml` 的 backend 步骤改为 `context: .` + `file: ./backend/Dockerfile`，
+  与 `compose.yaml` 里 backend 服务的构建方式保持一致；frontend 步骤补上显式 `file:`。
+- 本地已按 CI 的同一配置验证两个镜像都能构建：backend（2m30s）与 frontend（29s）均成功。
+
 ---
 
 ## 启用说明（速查）
