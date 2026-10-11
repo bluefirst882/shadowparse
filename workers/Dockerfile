@@ -25,17 +25,21 @@ WORKDIR /app
 # （否则每次改代码都要重装一遍几个 GB 的 CUDA torch）。
 COPY workers/runtime-requirements.txt /tmp/runtime-requirements.txt
 
-# 分步安装，避免在 Debian 上把整坨 CUDA 运行库和 triton 拉进来（镜像体积差一个量级）：
+# 分步安装，避免一次性把整坨 CUDA 运行库和可选项拉进来（镜像体积差一个量级）：
 # 1) torch 走 PyTorch 官方索引（cpu 或 cu124，由 build args 决定）；
-# 2) torch 与 numba 的纯 Python 依赖（runtime-requirements.txt）+ numba/numpy 本身；
-# 3) whisper 依赖里剩下几个；
-# 4) openai-whisper 本体用 --no-deps 装入：它的依赖上面都齐了，只跳过 Linux x86_64 上的 triton
-#    （triton 只在 whisper 的 DTW 加速里被可选导入，缺失会走 PyTorch 实现）。
+# 2) runtime-requirements.txt 里的纯 Python 依赖 + numpy；
+# 3) faster-whisper 本体（CTranslate2 后端，自带 ctranslate2 / onnxruntime / av 等依赖，
+#    不再依赖 openai-whisper 的 triton / DTW，装起来更轻也更稳）。
+#    av 必须 pin：faster-whisper 1.2.1 的 faster_whisper/audio.py 里调用
+#    av.open(..., metadata_errors="ignore")，而 av >= 17 移除了该参数；
+#    不 pin 的话 pip 会解析到最新 av，转写时 decode_audio 直接抛
+#    TypeError: open() got an unexpected keyword argument 'metadata_errors'。
+#    实测 16.0.0 仍支持该签名，17+ 不支持。
 RUN pip install --index-url ${TORCH_INDEX} torch==${TORCH_VERSION} \
-    && pip install -r /tmp/runtime-requirements.txt numba==0.61.2 numpy==2.1.3 \
+    && pip install -r /tmp/runtime-requirements.txt numpy==2.1.3 \
     && pip install tiktoken==0.9.0 tqdm==4.67.1 more-itertools==10.8.0 regex==2024.11.6 \
-    && pip install --no-deps openai-whisper==20250625 \
-    && python -c "import torch, whisper; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+    && pip install av==16.0.0 faster-whisper==1.2.1 \
+    && python -c "import torch, faster_whisper; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 
 COPY workers/whisper_worker.py /app/whisper_worker.py
 

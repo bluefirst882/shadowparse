@@ -176,14 +176,26 @@ def _drop_repeat_loops(segments):
     return kept, dropped
 
 
-def _word_dicts(words, offset, span):
-    """把 faster-whisper 的词级结果平移到绝对时间轴；无词级时返回空列表。"""
+def _word_dicts(words, offset, span, lo=None, hi=None):
+    """把 faster-whisper 的词级结果平移到绝对时间轴；无词级时返回空列表。
+
+    lo/hi 给定时再把词钳进所属段的 [lo, hi] 区间：
+    faster-whisper 的段边界来自时间戳 token，而词级时间来自 cross-attention 对齐，
+    两者会差出几十到几百毫秒，首词有时会落在所属段开始之前。下游（前端词高亮与
+    点击定位、以及任何按「段内的词」做切分的地方）都依赖
+    「词一定落在所属段的时间区间内」这个不变量，所以在这里兜住。
+    """
     out = []
     if not words:
         return out
     for w in words:
         ws = offset + min(float(w.start), span)
         we = offset + min(float(w.end), span)
+        if lo is not None and ws < lo:
+            ws = lo
+        if hi is not None and we > hi:
+            we = hi
+        # 钳到区间外导致时间塌缩的词（起止相等）直接丢掉，避免出现零长度词。
         if we > ws:
             out.append({"start": round(ws, 3), "end": round(we, 3), "text": w.word})
     return out
@@ -197,7 +209,10 @@ def _segment_dict(item, offset, span):
         "start": seg_start,
         "end": seg_end,
         "text": item.text.strip(),
-        "words": _word_dicts(getattr(item, "words", None), offset, span),
+        # 词级时间钳到所属段内，保证下游「词 ∈ 段」的不变量成立（见 _word_dicts 注释）。
+        "words": _word_dicts(
+            getattr(item, "words", None), offset, span, lo=seg_start, hi=seg_end
+        ),
         "compression_ratio": getattr(item, "compression_ratio", None),
         "avg_logprob": getattr(item, "avg_logprob", None),
     }
@@ -226,10 +241,11 @@ def transcribe_regions(model, audio, regions, language, device, word_ts):
         if len(chunk) < SR // 10:
             continue
         with contextlib.redirect_stdout(sys.stderr):
+            # 注意：faster-whisper 的 transcribe 没有 openai-whisper 的 verbose 参数
+            # （对应的是 log_progress），传了会直接 TypeError。
             seg_gen, info = model.transcribe(
                 chunk,
                 language=language,
-                verbose=False,
                 word_timestamps=word_ts,
             )
         detected = detected or (info.language if info else None)
@@ -321,7 +337,7 @@ def transcribe(audio_path, model_name, model_dir, language):
         with _TRANSCRIBE_LOCK:
             with contextlib.redirect_stdout(sys.stderr):
                 seg_gen, info = model.transcribe(
-                    audio_path, language=language, verbose=False, word_timestamps=word_ts
+                    audio_path, language=language, word_timestamps=word_ts
                 )
                 for item in seg_gen:
                     if not item.text.strip():
@@ -348,7 +364,11 @@ def transcribe(audio_path, model_name, model_dir, language):
                 probe = np.concatenate(
                     [audio[int(s * SR) : int(e * SR)] for s, e in regions[:8]]
                 )
-                detected_lang, _probs = model.detect_language(probe)
+                # faster-whisper 的 detect_language 返回
+                # (language, language_probability, all_language_probs) 三元组，
+                # 与 openai-whisper 的二元组不同；这里按索引取语言，
+                # 避免元组长度变化再次触发 "too many values to unpack"。
+                detected_lang = model.detect_language(probe)[0]
                 language = detected_lang
             segments, detected = transcribe_regions(
                 model, audio, regions, language, device, word_ts

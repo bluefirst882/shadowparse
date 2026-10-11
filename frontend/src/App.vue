@@ -13,7 +13,14 @@ import {
   UploadFilled
 } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
-import { ApiError, api, token, type Details, type Frame, type Task } from './api'
+import {
+  ApiError,
+  api,
+  token,
+  type Details,
+  type Frame,
+  type Task
+} from './api'
 const tasks = ref<Task[]>([]),
   selected = ref<Details>(),
   frames = ref<Frame[]>([]),
@@ -692,7 +699,8 @@ onUnmounted(stopStream)
         <section v-if="frames.length" class="frame-panel">
           <h2>关键帧</h2>
           <p class="muted">
-            场景检测抽取的画面切换点（悬停查看画面文字 OCR，可能有识别错误；点击跳转播放）。
+            场景检测抽取的画面切换点（悬停查看画面文字
+            OCR，可能有识别错误；点击跳转播放）。
           </p>
           <div class="frame-strip">
             <button

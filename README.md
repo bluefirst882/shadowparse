@@ -226,24 +226,24 @@ mel 被 clamp 成常数，`no_speech_prob` 反而输出 0（等于「100% 有语
 
 相关参数（都有默认值，一般不用动）：
 
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `WHISPER_VAD` | `1` | 置 `0` 关闭 VAD，退回「整段直接喂给 Whisper」 |
+| 变量                       | 默认  | 说明                                                                                     |
+| -------------------------- | ----- | ---------------------------------------------------------------------------------------- |
+| `WHISPER_VAD`              | `1`   | 置 `0` 关闭 VAD，退回「整段直接喂给 Whisper」                                            |
 | `WHISPER_VAD_THRESHOLD_DB` | `-45` | 判定为有声的帧能量阈值（dBFS）。录得偏轻往上调（如 `-50`），环境噪声大往下调（如 `-35`） |
-| `WHISPER_VAD_MERGE_GAP` | `1.0` | 间隔小于该秒数的相邻有声段合并，避免把一句话切成两次转写 |
-| `WHISPER_VAD_PAD` | `0.3` | 区间两端保留的余量（秒） |
-| `WHISPER_VAD_MAX_CHUNK` | `30` | 单个区间切分上限（秒） |
+| `WHISPER_VAD_MERGE_GAP`    | `1.0` | 间隔小于该秒数的相邻有声段合并，避免把一句话切成两次转写                                 |
+| `WHISPER_VAD_PAD`          | `0.3` | 区间两端保留的余量（秒）                                                                 |
+| `WHISPER_VAD_MAX_CHUNK`    | `30`  | 单个区间切分上限（秒）                                                                   |
 
 未指定 `X-Whisper-Language` 时，语言检测也在有声区间上做，而不是拿整段（含大片纯零）去检测——
 后者会被带偏成 `en`，是「中文视频后半段整段变成 Thank you.」的另一半原因。
 
 语言是**自动检测**的，没有默认值偏向中文。只有显式配置才会钉死：
 
-| 方式 | 作用范围 | 说明 |
-| --- | --- | --- |
-| 不配置（默认） | — | 每次转写在有声区间上自动检测语言 |
-| `WHISPER_LANGUAGE=zh` | 该 whisper 服务全局 | 所有任务都用中文解码，混语种素材会被硬解成中文 |
-| 请求头 `X-Whisper-Language` | 单次请求 | 优先级最高，可覆盖上面的全局值 |
+| 方式                        | 作用范围            | 说明                                           |
+| --------------------------- | ------------------- | ---------------------------------------------- |
+| 不配置（默认）              | —                   | 每次转写在有声区间上自动检测语言               |
+| `WHISPER_LANGUAGE=zh`       | 该 whisper 服务全局 | 所有任务都用中文解码，混语种素材会被硬解成中文 |
+| 请求头 `X-Whisper-Language` | 单次请求            | 优先级最高，可覆盖上面的全局值                 |
 
 另外转写完成后，若识别语言不是中文且已配置 LLM，后端会额外调 LLM 生成一份中文译文存进 `translation` 列
 （原文 `text` 不受影响）。这是既有行为，不是把识别语言改成中文。
@@ -254,13 +254,13 @@ mel 被 clamp 成常数，`no_speech_prob` 反而输出 0（等于「100% 有语
 约 4× 提速、显存占用更低；词级时间戳（`word_timestamps`）与说话人分离（pyannote）均为可选增强，
 缺依赖时各自优雅降级，不影响段级转写主产物。
 
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `WHISPER_WORD_TIMESTAMPS` | `1` | 词级时间戳（逐词跳转/高亮）。置 `0` 仅保留段级时间戳 |
-| `WHISPER_DIARIZE` | `1` | 说话人分离。置 `0` 关闭（产物不含 `speaker`） |
-| `WHISPER_HF_TOKEN` | 空 | HuggingFace token；说话人分离必需，否则自动降级为无说话人 |
-| `WHISPER_COMPUTE_TYPE` | cuda=`int8_float16` / cpu=`int8` | 推理精度；显存紧张可显式设 `int8` |
-| `WHISPER_DIARIZATION_MODEL` | `pyannote/speaker-diarization-3.1` | 分离模型，一般无需改动 |
+| 变量                        | 默认                               | 说明                                                      |
+| --------------------------- | ---------------------------------- | --------------------------------------------------------- |
+| `WHISPER_WORD_TIMESTAMPS`   | `1`                                | 词级时间戳（逐词跳转/高亮）。置 `0` 仅保留段级时间戳      |
+| `WHISPER_DIARIZE`           | `1`                                | 说话人分离。置 `0` 关闭（产物不含 `speaker`）             |
+| `WHISPER_HF_TOKEN`          | 空                                 | HuggingFace token；说话人分离必需，否则自动降级为无说话人 |
+| `WHISPER_COMPUTE_TYPE`      | cuda=`int8_float16` / cpu=`int8`   | 推理精度；显存紧张可显式设 `int8`                         |
+| `WHISPER_DIARIZATION_MODEL` | `pyannote/speaker-diarization-3.1` | 分离模型，一般无需改动                                    |
 
 启用说话人分离需三步：① 取消 `workers/requirements.txt` 里 `pyannote.pipeline` 的注释并重建 whisper 镜像；
 ② 在 HuggingFace 接受 `pyannote/speaker-diarization-3.1` 的许可；③ 配置 `WHISPER_HF_TOKEN`。
