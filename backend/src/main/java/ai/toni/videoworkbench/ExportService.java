@@ -29,15 +29,16 @@ class ExportService {
   private String srt(TaskDetails data) {
     StringBuilder out = new StringBuilder();
     int index = 1;
-    for (TranscriptSegment s : data.transcript())
+    for (TranscriptSegment s : data.transcript()) {
       out.append(index++)
           .append('\n')
           .append(stamp(s.startMs()))
           .append(" --> ")
           .append(stamp(s.endMs()))
-          .append('\n')
-          .append(s.text())
-          .append("\n\n");
+          .append('\n');
+      if (s.speaker() != null) out.append('[').append(s.speaker()).append("] ");
+      out.append(s.text()).append("\n\n");
+    }
     return out.toString();
   }
 
@@ -48,8 +49,11 @@ class ExportService {
       for (String point : data.result().keyPoints()) out.append("- ").append(point).append('\n');
     }
     out.append("\n## 转写\n\n");
-    for (TranscriptSegment s : data.transcript())
-      out.append("**").append(stamp(s.startMs())).append("** ").append(s.text()).append("\n\n");
+    for (TranscriptSegment s : data.transcript()) {
+      out.append("**").append(stamp(s.startMs())).append("** ");
+      if (s.speaker() != null) out.append('`').append(s.speaker()).append("` ");
+      out.append(s.text()).append("\n\n");
+    }
     return out.toString();
   }
 

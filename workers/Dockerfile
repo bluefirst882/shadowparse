@@ -21,7 +21,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY workers/whisper_worker.py /app/whisper_worker.py
+# 只先拷贝依赖清单：worker 源码放在 pip 之后拷贝，改一行 Python 不会让下面这层缓存失效
+# （否则每次改代码都要重装一遍几个 GB 的 CUDA torch）。
 COPY workers/runtime-requirements.txt /tmp/runtime-requirements.txt
 
 # 分步安装，避免在 Debian 上把整坨 CUDA 运行库和 triton 拉进来（镜像体积差一个量级）：
@@ -35,6 +36,8 @@ RUN pip install --index-url ${TORCH_INDEX} torch==${TORCH_VERSION} \
     && pip install tiktoken==0.9.0 tqdm==4.67.1 more-itertools==10.8.0 regex==2024.11.6 \
     && pip install --no-deps openai-whisper==20250625 \
     && python -c "import torch, whisper; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+
+COPY workers/whisper_worker.py /app/whisper_worker.py
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=20 \
     CMD curl -fsS http://127.0.0.1:8090/health || exit 1

@@ -24,17 +24,32 @@ class TaskRepository {
     this.jdbc = jdbc;
     this.json = json;
     this.events = events;
-  }
-
-  private final RowMapper<VideoTask> mapper = (r, n) -> map(r);
-  private final RowMapper<TranscriptSegment> segmentMapper =
-      (r, n) ->
-          new TranscriptSegment(
+    this.mapper = (r, n) -> map(r);
+    this.segmentMapper =
+        (r, n) -> {
+          String speaker = r.getString("speaker");
+          List<TranscriptWord> words = List.of();
+          String wordsJson = r.getString("words");
+          if (wordsJson != null) {
+            try {
+              words = json.readValue(wordsJson, new TypeReference<List<TranscriptWord>>() {});
+            } catch (Exception ex) {
+              throw new SQLException(ex);
+            }
+          }
+          return new TranscriptSegment(
               r.getLong("id"),
               r.getLong("start_ms"),
               r.getLong("end_ms"),
               r.getString("text"),
-              r.getString("translation"));
+              r.getString("translation"),
+              speaker,
+              words);
+        };
+  }
+
+  private final RowMapper<VideoTask> mapper;
+  private final RowMapper<TranscriptSegment> segmentMapper;
 
   /**
    * 按 {@code (created_at desc, id desc)} 取一页任务。{@code cursor} 为空表示第一页；否则用 {@code (created_at, id)}
@@ -248,14 +263,26 @@ class TaskRepository {
   @Transactional
   void replaceSegments(String taskId, List<TranscriptSegment> segments) {
     jdbc.update("delete from transcript_segments where task_id=?", taskId);
-    for (TranscriptSegment segment : segments)
+    for (TranscriptSegment segment : segments) {
+      String wordsJson = null;
+      try {
+        wordsJson =
+            segment.words() == null || segment.words().isEmpty()
+                ? null
+                : json.writeValueAsString(segment.words());
+      } catch (Exception ex) {
+        throw new IllegalStateException("无法序列化词级时间戳", ex);
+      }
       jdbc.update(
-          "insert into transcript_segments(task_id,start_ms,end_ms,text,translation) values(?,?,?,?,?)",
+          "insert into transcript_segments(task_id,start_ms,end_ms,text,translation,speaker,words) values(?,?,?,?,?,?,cast(? as json))",
           taskId,
           segment.startMs(),
           segment.endMs(),
           segment.text(),
-          segment.translation());
+          segment.translation(),
+          segment.speaker(),
+          wordsJson);
+    }
     // A summary refers to the previous transcript version and must never be shown with new
     // segments.
     jdbc.update("delete from task_results where task_id=?", taskId);

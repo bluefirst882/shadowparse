@@ -1,5 +1,10 @@
 export type Stage =
-  'IMPORT' | 'AUDIO_EXTRACTION' | 'TRANSCRIPTION' | 'SUMMARY' | 'COMPLETED'
+  | 'IMPORT'
+  | 'AUDIO_EXTRACTION'
+  | 'VISUAL_EXTRACTION'
+  | 'TRANSCRIPTION'
+  | 'SUMMARY'
+  | 'COMPLETED'
 export type Task = {
   id: string
   fileName: string
@@ -12,12 +17,22 @@ export type Task = {
   errorMessage?: string
   updatedAt: string
 }
+export type Word = {
+  startMs: number
+  endMs: number
+  text: string
+  speaker?: string | null
+}
 export type Segment = {
   id: number
   startMs: number
   endMs: number
   text: string
   translation?: string
+  // 说话人标签（pyannote 分离结果）；未分离时为 null/缺失。
+  speaker?: string | null
+  // 词级时间戳（faster-whisper word_timestamps）；未启用时为空/缺失。
+  words?: Word[]
 }
 export type Chapter = {
   startMs: number
@@ -33,6 +48,8 @@ export type Details = {
   transcript: Segment[]
   result?: { summary: string; keyPoints: string[]; chapters: Chapter[] }
 }
+// 关键帧：缩略图走单独的图片端点（frameImageUrl），ocrText 为空表示该帧没有识别出画面文字。
+export type Frame = { tsMs: number; ocrText?: string | null }
 // 列表接口按游标分页：nextCursor 为 null 表示没有更多数据。
 export type TaskPage = { items: Task[]; nextCursor?: string | null }
 // 分片上传会话：receivedChunks 是服务端已落盘的分片序号，续传时只补缺的那些。
@@ -137,6 +154,7 @@ export const api = {
       `/tasks${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`
     ),
   details: (id: string) => request<Details>(`/tasks/${id}/details`),
+  frames: (id: string) => request<Frame[]>(`/tasks/${id}/frames`),
   // 分片上传：先按「文件名 + 大小」拿到会话，再只补缺失的分片，最后登记成任务。
   upload: async (file: File, onProgress?: (sentBytes: number) => void) => {
     const session = await request<UploadSession>('/tasks/uploads', {
@@ -192,6 +210,8 @@ export const api = {
   // 视频与导出由浏览器直接发起，无法附加请求头，因此以查询参数携带令牌。
   videoUrl: (id: string) =>
     `/api/tasks/${id}/video?access_token=${encodeURIComponent(token.get() ?? '')}`,
+  frameImageUrl: (id: string, tsMs: number) =>
+    `/api/tasks/${id}/frames/${tsMs}/image?access_token=${encodeURIComponent(token.get() ?? '')}`,
   exportUrl: (id: string, format: 'md' | 'json' | 'srt') =>
     `/api/tasks/${id}/export/${format}?access_token=${encodeURIComponent(token.get() ?? '')}`
 }

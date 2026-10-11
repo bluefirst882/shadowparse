@@ -52,6 +52,7 @@ class TaskService {
   private final TaskQueue queue;
   private final TaskLease lease;
   private final DownstreamResilience resilience;
+  private final VisualExtractionService visuals;
   // 复用同一个客户端：HttpClient 自带连接池与选择器线程，每次调用新建一个会持续泄漏线程与连接。
   private final HttpClient whisperHttp =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
@@ -74,7 +75,8 @@ class TaskService {
       @Value("${workbench.llm.max-input-chars:60000}") int summaryMaxInputChars,
       TaskQueue queue,
       TaskLease lease,
-      DownstreamResilience resilience) {
+      DownstreamResilience resilience,
+      VisualExtractionService visuals) {
     this.tasks = tasks;
     this.json = json;
     this.llm = llm;
@@ -92,6 +94,7 @@ class TaskService {
     this.queue = queue;
     this.lease = lease;
     this.resilience = resilience;
+    this.visuals = visuals;
   }
 
   TaskPage list(String ownerId, TaskCursor cursor, int limit) {
@@ -125,6 +128,24 @@ class TaskService {
 
   TaskDetails details(String id, String ownerId) {
     return new TaskDetails(get(id, ownerId), tasks.segments(id), tasks.result(id).orElse(null));
+  }
+
+  /** 关键帧列表（缩略图 URL 由前端按约定拼装）；只返回自己的任务的帧。 */
+  List<FrameRepository.VideoFrame> frames(String id, String ownerId) {
+    get(id, ownerId);
+    return visuals.frames(id);
+  }
+
+  /** 帧图文件：归属校验后直接回源文件，帧图不存在时 404。 */
+  java.nio.file.Path frameImage(String id, String ownerId, long tsMs) {
+    FrameRepository.VideoFrame frame =
+        visuals.frames(id).stream()
+            .filter(candidate -> candidate.tsMs() == tsMs)
+            .findFirst()
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "帧不存在"));
+    java.nio.file.Path image = Path.of(frame.path());
+    if (!Files.exists(image)) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "帧图文件已清理");
+    return image;
   }
 
   FileSystemResource video(String id, String ownerId) {
@@ -221,6 +242,7 @@ class TaskService {
       throw new ResponseStatusException(HttpStatus.CONFLICT, "只能取消排队中或正在处理的任务");
     Process process = runningProcesses.remove(id);
     if (process != null) process.destroyForcibly();
+    visuals.cancel(id);
   }
 
   void retry(String id, String ownerId) {
@@ -256,6 +278,7 @@ class TaskService {
     VideoTask task = get(id, ownerId);
     Process process = runningProcesses.remove(id);
     if (process != null) process.destroyForcibly();
+    visuals.cancel(id);
     IOException cleanupFailure = null;
     try {
       Files.deleteIfExists(Path.of(task.videoPath()));
@@ -267,6 +290,7 @@ class TaskService {
     } catch (IOException ex) {
       if (cleanupFailure == null) cleanupFailure = ex;
     }
+    visuals.deleteFrameFiles(id);
     if (cleanupFailure != null) {
       throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "本地文件清理失败，任务记录已保留");
     }
@@ -366,10 +390,24 @@ class TaskService {
               "16000",
               audio.toString()));
       checkCancelled(id);
+      tasks.update(id, TaskStatus.PROCESSING, TaskStage.VISUAL_EXTRACTION, 25, null);
+      currentStage = TaskStage.VISUAL_EXTRACTION;
+      // 视觉分支是尽力而为：抽帧失败（ffmpeg 报错、视频无画面轨）只记 WARN，任务继续走语音主链路。
+      try {
+        int extracted = visuals.extractAndPersist(id, task.videoPath());
+        log.info("关键帧抽取完成：taskId={} frames={}", id, extracted);
+      } catch (IOException ex) {
+        log.warn("关键帧抽取失败，任务按无画面分支继续：taskId={} detail={}", id, tail(ex.getMessage()));
+      }
+      checkCancelled(id);
       tasks.update(id, TaskStatus.PROCESSING, TaskStage.TRANSCRIPTION, 45, null);
       currentStage = TaskStage.TRANSCRIPTION;
+      // OCR（CPU）与 Whisper（GPU）并行：OCR 在独立线程池里跑，这里只等结果不抢资源。
+      // OCR 整路失败由 awaitOcr 降级为「无画面文本」，绝不打断转写主链路。
+      CompletableFuture<Boolean> ocrFuture = visuals.ocrAsync(id);
       // Worker emits JSON to stdout; production parser persists each timestamped segment here.
       transcribe(id, audio);
+      visuals.awaitOcr(id, ocrFuture);
       checkCancelled(id);
       // 转写完成后直接串联内容生成，无需用户手动触发。
       generateContent(id);
@@ -434,6 +472,7 @@ class TaskService {
               llm.summarize(
                   id,
                   transcript,
+                  visuals.frameTexts(id),
                   summaryMaxInputChars,
                   failure == null ? null : failure.getMessage());
           checkCancelled(id);
@@ -574,13 +613,29 @@ class TaskService {
       long start = Math.round(segment.path("start").asDouble() * 1000);
       long end = Math.round(segment.path("end").asDouble() * 1000);
       String text = segment.path("text").asText().trim();
-      if (end > start && !text.isBlank())
-        saved.add(new TranscriptSegment(0, start, end, text, null));
+      if (end <= start || text.isBlank()) continue;
+      String speaker = segment.path("speaker").asText(null);
+      List<TranscriptWord> words = parseWords(segment.path("words"));
+      saved.add(new TranscriptSegment(0, start, end, text, null, speaker, words));
     }
     if (saved.isEmpty()) throw new IOException("转写内容为空");
     tasks.replaceSegments(id, saved);
     if (!root.path("language").asText().startsWith("zh") && llm.configured())
       tasks.replaceTranslations(id, llm.translateToChinese(id, tasks.segments(id)));
+  }
+
+  /** 把 worker 的 {@code words} 数组（[{start,end,text,speaker?}]）解析为词级时间戳；缺失或为空则降级为空列表。 */
+  private List<TranscriptWord> parseWords(JsonNode wordsNode) {
+    if (!wordsNode.isArray() || wordsNode.isEmpty()) return List.of();
+    java.util.ArrayList<TranscriptWord> words = new java.util.ArrayList<>();
+    for (JsonNode w : wordsNode) {
+      long ws = Math.round(w.path("start").asDouble() * 1000);
+      long we = Math.round(w.path("end").asDouble() * 1000);
+      String wt = w.path("text").asText().trim();
+      if (wt.isBlank()) continue;
+      words.add(new TranscriptWord(ws, we, wt, w.path("speaker").asText(null)));
+    }
+    return words;
   }
 
   private void checkCancelled(String id) {

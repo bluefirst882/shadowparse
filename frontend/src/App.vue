@@ -13,9 +13,10 @@ import {
   UploadFilled
 } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
-import { ApiError, api, token, type Details, type Task } from './api'
+import { ApiError, api, token, type Details, type Frame, type Task } from './api'
 const tasks = ref<Task[]>([]),
   selected = ref<Details>(),
+  frames = ref<Frame[]>([]),
   loading = ref(false),
   uploading = ref(false),
   uploadPercent = ref(0),
@@ -51,6 +52,7 @@ const filteredTranscript = computed(
 const stageName: Record<string, string> = {
   IMPORT: '等待导入',
   AUDIO_EXTRACTION: '提取音频',
+  VISUAL_EXTRACTION: '抽取关键帧',
   TRANSCRIPTION: '本地转写',
   SUMMARY: '生成内容',
   COMPLETED: '已完成'
@@ -74,7 +76,15 @@ async function refresh() {
     nextCursor.value = cursor
     if (selected.value) {
       const current = merged.find((task) => task.id === selected.value?.task.id)
-      if (current) selected.value = await api.details(current.id)
+      if (current) {
+        selected.value = await api.details(current.id)
+        // OCR 文本在转写期间异步回填，轮询时顺带刷新帧列表；帧接口失败不影响主流程。
+        try {
+          frames.value = await api.frames(current.id)
+        } catch {
+          frames.value = []
+        }
+      }
     }
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
@@ -238,6 +248,13 @@ async function openTask(task: Task) {
     videoError.value = false
     selected.value = await api.details(task.id)
     transcriptQuery.value = ''
+    frames.value = []
+    // 帧列表独立加载：接口失败不影响详情展示（旧任务没有帧，接口 404/空列表都当作「无帧」）。
+    try {
+      frames.value = await api.frames(task.id)
+    } catch {
+      frames.value = []
+    }
   } catch (error) {
     message.value = describe(error, '无法读取任务详情。')
   }
@@ -259,6 +276,25 @@ function toggleQuote(startMs: number) {
 function stamp(ms: number) {
   const s = Math.floor(ms / 1000)
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+}
+// 说话人固定配色：按首次出现顺序分配调色板颜色，保证同一说话人颜色稳定、不同说话人彼此区分。
+const SPEAKER_PALETTE = [
+  '#e57373',
+  '#64b5f6',
+  '#81c784',
+  '#ffb74d',
+  '#ba68c8',
+  '#4db6ac',
+  '#f06292',
+  '#a1887f'
+]
+const speakerOrder = new Map<string, number>()
+let speakerCounter = 0
+function speakerColor(speaker: string | null | undefined) {
+  if (!speaker) return '#8a98a6'
+  if (!speakerOrder.has(speaker))
+    speakerOrder.set(speaker, speakerCounter++ % SPEAKER_PALETTE.length)
+  return SPEAKER_PALETTE[speakerOrder.get(speaker) as number]
 }
 function bytes(n: number) {
   return n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : (n / 1e6).toFixed(0) + ' MB'
@@ -653,6 +689,27 @@ onUnmounted(stopStream)
             </div>
           </aside>
         </section>
+        <section v-if="frames.length" class="frame-panel">
+          <h2>关键帧</h2>
+          <p class="muted">
+            场景检测抽取的画面切换点（悬停查看画面文字 OCR，可能有识别错误；点击跳转播放）。
+          </p>
+          <div class="frame-strip">
+            <button
+              v-for="frame in frames"
+              :key="frame.tsMs"
+              class="frame"
+              :title="frame.ocrText || '未识别出画面文字'"
+              @click="seek(frame.tsMs)"
+            >
+              <img
+                :src="api.frameImageUrl(selected.task.id, frame.tsMs)"
+                loading="lazy"
+                alt=""
+              /><span>{{ stamp(frame.tsMs) }}</span>
+            </button>
+          </div>
+        </section>
         <section class="detail-grid">
           <article class="panel transcript">
             <div class="panel-title">
@@ -676,9 +733,34 @@ onUnmounted(stopStream)
               }"
               @click="seek(segment.startMs)"
             >
-              <span>{{ stamp(segment.startMs) }}</span
-              ><b>{{ segment.text }}</b
-              ><small v-if="segment.translation">{{
+              <span class="segment-time">{{ stamp(segment.startMs) }}</span>
+              <span
+                v-if="segment.speaker"
+                class="speaker"
+                :style="{ color: speakerColor(segment.speaker) }"
+                >{{ segment.speaker }}</span
+              >
+              <b v-if="!segment.words || segment.words.length === 0">{{
+                segment.text
+              }}</b>
+              <span v-else class="words">
+                <span
+                  v-for="(w, i) in segment.words"
+                  :key="i"
+                  class="word"
+                  :class="{
+                    active: currentMs >= w.startMs && currentMs < w.endMs
+                  }"
+                  :style="
+                    (w.speaker ?? segment.speaker)
+                      ? { color: speakerColor(w.speaker ?? segment.speaker) }
+                      : undefined
+                  "
+                  @click.stop="seek(w.startMs)"
+                  >{{ w.text }}</span
+                >
+              </span>
+              <small v-if="segment.translation">{{
                 segment.translation
               }}</small>
             </button>
@@ -702,3 +784,52 @@ onUnmounted(stopStream)
     ></el-container
   >
 </template>
+<style scoped>
+.frame-panel {
+  margin-top: 20px;
+}
+.frame-panel h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+.frame-panel .muted {
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+.frame-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+.frame {
+  flex: 0 0 auto;
+  width: 128px;
+  padding: 0;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  overflow: hidden;
+  text-align: center;
+}
+.frame img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+.frame span {
+  display: block;
+  padding: 3px 0;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.frame:hover {
+  border-color: var(--el-color-primary);
+}
+.frame:hover span {
+  color: var(--el-color-primary);
+}
+</style>
